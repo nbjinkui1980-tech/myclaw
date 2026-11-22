@@ -1,0 +1,13 @@
+{
+  "specVersion": "1.0",
+  "type": "CALLBACK",
+  "headers": {
+    "appId": "REDACTED_APP_ID",
+    "connectionId": "REDACTED_CONNECTION_ID",
+    "contentType": "application/json",
+    "messageId": "REDACTED_MESSAGE_ID_DM",
+    "time": "1700000000000",
+    "topic": "/v1.0/im/bot/messages/get"
+  },
+  "data": "{\"conversationId\": \"cidREDACTED_CONVERSATION_ID\", \"chatbotCorpId\": \"dingREDACTED_CORP_ID\", \"chatbotUserId\": \"REDACTED_CHATBOT_USER_ID\", \"msgId\": \"msgREDACTED_MSG_ID\", \"senderNick\": \"REDACTED_NICK\", \"isAdmin\": false, \"senderStaffId\": \"REDACTED_STAFF_ID\", \"sessionWebhookExpiredTime\": 1700000000000, \"createAt\": 1699999999000, \"senderCorpId\": \"dingREDACTED_CORP_ID\", \"senderId\": \"REDACTED_SENDER_ID\", \"sessionWebhook\": \"https://REDACTED_SESSION_WEBHOOK_HOST/robot/sendBySession?session=REDACTED\", \"robotCode\": \"REDACTED_ROBOT_CODE\", \"msgtype\": \"text\", \"conversationType\": \"1\", \"text\": {\"content\": \"hello from a single chat\"}}"
+}

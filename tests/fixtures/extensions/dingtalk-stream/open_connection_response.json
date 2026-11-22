@@ -1,0 +1,4 @@
+{
+  "endpoint": "wss://REDACTED_GATEWAY_HOST/connect",
+  "ticket": "REDACTED_TICKET"
+}
