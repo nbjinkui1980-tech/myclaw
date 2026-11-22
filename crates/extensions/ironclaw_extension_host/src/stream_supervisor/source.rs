@@ -13,7 +13,9 @@ use crate::deployment_channels::DeploymentChannelBinding;
 /// Where a stream channel's bindings came from. Identity is by `Arc`, so a
 /// republished (re-activated) extension is a different source and its
 /// connection restarts. A deployment binding never changes identity, so its
-/// connection restarts on the configuration-change signal instead.
+/// connection restarts on the configuration-change signal instead. A
+/// deployment connection runs only while an installation of the extension is
+/// active.
 #[derive(Clone)]
 pub(super) enum StreamSource {
     Deployment(Arc<DeploymentChannelBinding>),

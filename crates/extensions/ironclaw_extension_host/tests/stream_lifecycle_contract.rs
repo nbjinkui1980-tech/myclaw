@@ -198,6 +198,64 @@ async fn a_configuration_change_restarts_a_deployment_stream_that_needs_an_admin
     wait_until(|| harness.gateway.ack_count() == 1, "the ACK").await;
 }
 
+/// A deployment-bound stream runs only while an installation is active: it
+/// does not dial at boot with nothing installed, closes when the last
+/// installation goes away, and reconnects on reinstall with no change signal.
+#[tokio::test]
+async fn a_deployment_stream_runs_only_while_an_installation_is_active() {
+    let harness = Harness::start(HarnessOptions {
+        deployment: true,
+        ..HarnessOptions::default()
+    })
+    .await;
+    reconcile_fence(&harness, "acme-fence-one").await;
+    assert_eq!(
+        harness
+            .audit
+            .count_for(EXTENSION_ID, &StreamAuditKind::Connected),
+        0,
+        "no installation, no deployment connection"
+    );
+
+    harness.activate().await;
+    connected(&harness, 2).await;
+    let accepts = harness.gateway.accepts.load(Ordering::SeqCst);
+
+    harness
+        .host
+        .deactivate(EXTENSION_ID)
+        .await
+        .expect("deactivate");
+    wait_until(
+        || {
+            harness
+                .audit
+                .count_for(EXTENSION_ID, &StreamAuditKind::Stopped)
+                == 1
+        },
+        "the deployment connection to stop",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        harness.gateway.accepts.load(Ordering::SeqCst),
+        accepts,
+        "a removed installation's deployment stream is never redialed"
+    );
+
+    harness.host.activate(EXTENSION_ID).await.expect("activate");
+    wait_until(
+        || {
+            harness
+                .audit
+                .count_for(EXTENSION_ID, &StreamAuditKind::Connected)
+                == 2
+        },
+        "the reconnection without any change signal",
+    )
+    .await;
+}
+
 /// Activates another stream extension and waits for its connection. The
 /// supervisor serializes reconcile passes, and the pass that dials the new
 /// extension checks every running connection against the current

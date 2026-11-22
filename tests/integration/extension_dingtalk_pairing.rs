@@ -144,6 +144,8 @@ where
 struct Gateway {
     addr: SocketAddr,
     accepts: Arc<AtomicUsize>,
+    /// Sockets whose read loop ended (the host closed or dropped them).
+    closed: Arc<AtomicUsize>,
     connections: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>>,
     acks: Arc<Mutex<Vec<String>>>,
 }
@@ -154,12 +156,14 @@ impl Gateway {
         let gateway = Self {
             addr: listener.local_addr().expect("addr"),
             accepts: Arc::default(),
+            closed: Arc::default(),
             connections: Arc::default(),
             acks: Arc::default(),
         };
         let accepts = Arc::clone(&gateway.accepts);
         let connections = Arc::clone(&gateway.connections);
         let acks = Arc::clone(&gateway.acks);
+        let closed = Arc::clone(&gateway.closed);
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let Ok(socket) = tokio_tungstenite::accept_async(stream).await else {
@@ -170,6 +174,7 @@ impl Gateway {
                 let (tx, mut rx) = mpsc::unbounded_channel::<String>();
                 lock(&connections).push(tx);
                 let acks = Arc::clone(&acks);
+                let closed = Arc::clone(&closed);
                 tokio::spawn(async move {
                     loop {
                         tokio::select! {
@@ -188,10 +193,15 @@ impl Gateway {
                             },
                         }
                     }
+                    closed.fetch_add(1, Ordering::SeqCst);
                 });
             }
         });
         gateway
+    }
+
+    fn closed(&self) -> usize {
+        self.closed.load(Ordering::SeqCst)
     }
 
     fn accepts(&self) -> usize {
@@ -1502,4 +1512,154 @@ async fn administrator_saved_credentials_journey() {
     let rendered = format!("{:?}", stream_connections(services));
     assert!(!rendered.contains(DINGTALK_CLIENT_SECRET));
     assert!(!rendered.contains(DINGTALK_CLIENT_ID));
+}
+
+/// Run one scripted lifecycle tool call (`install` or `remove` of DingTalk)
+/// on a fresh thread of the journey's group, the production caller path.
+async fn dingtalk_lifecycle_turn(group: &RebornIntegrationGroup, label: &str, capability: &str) {
+    let thread = group
+        .thread(format!("conv-dingtalk-{label}"))
+        .script([
+            RebornScriptedReply::tool_call(capability, json!({"extension_id": EXTENSION})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("lifecycle thread builds");
+    thread
+        .submit_turn(label)
+        .await
+        .expect("lifecycle turn completes");
+    thread
+        .assert_tool_invoked(capability)
+        .await
+        .expect("the lifecycle tool ran");
+    let expected = if capability == "builtin.extension_remove" {
+        "\"removed\":true"
+    } else {
+        "\"phase\":\"active\""
+    };
+    thread
+        .assert_tool_result_contains(expected)
+        .await
+        .expect("the lifecycle tool succeeded");
+}
+
+/// Remove closes the deployment-bound stream and a reinstall reconnects
+/// without a restart. The administrator's credentials survive the removal;
+/// the caller's pairing does not.
+#[tokio::test]
+async fn dingtalk_remove_closes_the_deployment_stream_and_reinstall_reconnects() {
+    Box::pin(remove_and_reinstall_journey()).await;
+}
+async fn remove_and_reinstall_journey() {
+    use ironclaw_product_contracts::lifecycle_service::ExtensionStreamState;
+    let journey = Box::pin(Journey::start_with(
+        "remove",
+        true,
+        Credentials::AdministratorLater,
+    ))
+    .await;
+    let (gateway, egress) = (&journey.gateway, &journey.egress);
+    let services = journey.services();
+    wait_until(
+        || stream_state(services).is_some(),
+        "the stopped connection state before credentials exist",
+    )
+    .await;
+    configure_dingtalk_admin(
+        &journey.group,
+        json!([
+            {"handle": "dingtalk_client_id", "value": DINGTALK_CLIENT_ID},
+            {"handle": "dingtalk_client_secret", "value": DINGTALK_CLIENT_SECRET},
+        ]),
+    )
+    .await;
+    wait_until(
+        || stream_state(services) == Some((ExtensionStreamState::Connected, None)),
+        "the connection after the administrator saved credentials",
+    )
+    .await;
+    assert_eq!(gateway.accepts(), 1);
+
+    let user = journey.inbound.binding.actor_user_id.clone();
+    journey.pair(&user, STAFF, DM_CONVERSATION, "R-1").await;
+    let channel_connection = journey
+        .group
+        .channel_connection()
+        .expect("the group composes production channel connection");
+    assert!(
+        channel_connection
+            .caller_channel_connected(EXTENSION, &user)
+            .await
+            .expect("connection state reads"),
+        "paired before the removal"
+    );
+    let connects_before = requests_to(egress, "/v1.0/gateway/connections/open").len();
+
+    // Remove: the socket closes, nothing redials, the state is gone, and the
+    // caller's pairing is deleted.
+    dingtalk_lifecycle_turn(&journey.group, "remove", "builtin.extension_remove").await;
+    wait_until(|| gateway.closed() == 1, "the stream socket to close").await;
+    wait_until(
+        || stream_state(services).is_none(),
+        "the connection state to clear",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(gateway.accepts(), 1, "no redial after the removal");
+    assert_eq!(
+        requests_to(egress, "/v1.0/gateway/connections/open").len(),
+        connects_before,
+        "no connect call after the removal"
+    );
+    assert!(
+        !channel_connection
+            .caller_channel_connected(EXTENSION, &user)
+            .await
+            .expect("connection state reads"),
+        "removal deletes the caller's pairing"
+    );
+
+    // Reinstall without saving credentials again: it reconnects with the
+    // retained administrator configuration.
+    dingtalk_lifecycle_turn(&journey.group, "reinstall", "builtin.extension_install").await;
+    wait_until(|| gateway.accepts() == 2, "the reconnection").await;
+    wait_until(
+        || stream_state(services) == Some((ExtensionStreamState::Connected, None)),
+        "the reconnected state",
+    )
+    .await;
+    let connects = requests_to(egress, "/v1.0/gateway/connections/open");
+    assert_eq!(connects.len(), connects_before + 1);
+    let body: Value =
+        serde_json::from_slice(&connects.last().expect("a connect call").body).expect("JSON");
+    assert_eq!(body["clientId"], DINGTALK_CLIENT_ID);
+    assert_eq!(body["clientSecret"], DINGTALK_CLIENT_SECRET);
+
+    // The earlier pairing is gone: the same sender is asked to connect again.
+    assert!(
+        !channel_connection
+            .caller_channel_connected(EXTENSION, &user)
+            .await
+            .expect("connection state reads"),
+        "a reinstall does not restore the pairing"
+    );
+    let nudges_before = dm_sends_containing(egress, CONNECT_REQUIRED).len();
+    gateway.send(callback_frame(
+        "R-2",
+        &callback_data(
+            "R-2-msg",
+            CORP,
+            STAFF,
+            DM_CONVERSATION,
+            "are you there again?",
+        ),
+    ));
+    journey.settle_frame("R-2").await;
+    wait_until(
+        || dm_sends_containing(egress, CONNECT_REQUIRED).len() > nudges_before,
+        "the connect-required notice for the unpaired sender",
+    )
+    .await;
 }

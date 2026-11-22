@@ -41,6 +41,9 @@ Grouped by responsibility (all modules are `pub`; see `src/lib.rs`):
   stream connection never changes source identity, so it restarts on the
   administrator configuration-change signal (`StreamConfigurationChanges`,
   raised by `StreamRestartingReactivation` around the re-activation port).
+  It runs only while an installation of the extension is active: nothing
+  dials before an install, the last removal closes it, and a reinstall
+  reconnects without a signal.
 - **Channel services (generic, per-extension)** — `GenericChannelHostAssembly`
   (`channel_host.rs`, the ingress reconciler), delivery ports
   (`run_delivery_ports.rs`, `channel_delivery.rs`), egress transports

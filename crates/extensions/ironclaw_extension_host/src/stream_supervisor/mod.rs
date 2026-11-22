@@ -227,12 +227,19 @@ impl StreamSupervisor {
 
     fn desired(&self) -> HashMap<String, StreamSource> {
         let mut desired = HashMap::new();
+        let snapshot: Arc<ActiveSnapshot> = self.deps.watch.current();
+        // A deployment binding is assembled once for the process, so it cannot
+        // tell whether anything is installed. The connection runs only while
+        // the extension has an active installation, which makes remove and
+        // deactivate stop it and a reinstall start it again.
         for extension_id in self.deps.deployment_channels.extension_ids() {
+            if snapshot.extension(&extension_id).is_none() {
+                continue;
+            }
             if let Some(binding) = self.deps.deployment_channels.extension(&extension_id) {
                 desired.insert(extension_id, StreamSource::Deployment(binding));
             }
         }
-        let snapshot: Arc<ActiveSnapshot> = self.deps.watch.current();
         for extension_id in snapshot.extension_ids() {
             if let Some(active) = snapshot.extension(&extension_id) {
                 // Deployment bindings win for the same extension id, exactly
