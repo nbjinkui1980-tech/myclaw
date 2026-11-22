@@ -1,0 +1,151 @@
+# The DingTalk extension: one `[channel]` surface for an enterprise-internal
+# application robot, received over DingTalk's Stream mode.
+#
+# Deployment model: ONE deployment serves ONE DingTalk organisation. The
+# operator creates an enterprise-internal application in their own
+# organisation and fills in its credentials below. Multiple organisations per
+# deployment and the DingTalk app-market (ISV) model are out of scope.
+#
+# Stream mode needs no public address: the host dials out (`[channel.ingress.stream]`)
+# and reads robot callbacks off its own authenticated connection. Only a single
+# replica may hold the connection (ADR §9).
+schema_version = "reborn.extension_manifest.v3"
+id = "dingtalk"
+name = "DingTalk"
+version = "0.1.0"
+description = "DingTalk: chat with the assistant through your organisation's DingTalk robot, in single chats and by @mentioning the robot in groups."
+trust = "first_party_requested"
+[runtime]
+kind = "first_party"
+service = "dingtalk.extension/v1"
+[admin_configuration]
+group_id = "extension.dingtalk"
+display_name = "DingTalk deployment configuration"
+description = "Credentials of your organisation's enterprise-internal DingTalk application. Stream mode connects outward from IronClaw, so no public address, tunnel or webhook URL is needed. Use these credentials in one IronClaw instance only."
+# BOTH values are stored as secrets. ClientID is not sensitive on its own, but
+# the host injects connect and token-exchange request bodies only from SECRET
+# handles (`body_credentials`), and the send side needs the same value as the
+# robot code, so the operator enters it once and it is kept encrypted.
+fields = [
+  { handle = "dingtalk_client_id", label = "ClientID (AppKey)", secret = true, required = true, description = "The application's ClientID (AppKey) from the DingTalk developer console. It is stored encrypted because the host can only inject secret values into requests." },
+  { handle = "dingtalk_client_secret", label = "ClientSecret (AppSecret)", secret = true, required = true, description = "The application's ClientSecret (AppSecret) from the DingTalk developer console." },
+]
+[channel]
+id = "messages"
+display_name = "DingTalk messages"
+conversation_model = "continuous"
+commands = ["model", "status", "new", "stop", "interrupt"]
+# Shared-conversation admission is presence-based (run-acts-as-invoker), like
+# Telegram: a group the robot is in is served, the callback arriving over the
+# authenticated connection is the membership evidence, and each participant
+# runs as themselves once paired.
+# Pairing: the user generates a code in IronClaw and sends it to the robot in a
+# single chat. DingTalk has no start-link, so there is no deep_link_template,
+# and the bare code is the whole message (no inbound_code_prefixes). Only
+# members of the robot's own organisation reach pairing (stateless corp-id
+# rule, ADR §14.2). Pairing binds the sender's DingTalk staff id for this
+# deployment's single organisation.
+[channel.connection]
+provider = "dingtalk"
+strategy = "web_generated_code"
+instructions = "Open a single chat with your organisation's DingTalk robot and send it the code shown here as the whole message. This connects your DingTalk account to your IronClaw user."
+input_placeholder = ""
+submit_label = "Connect DingTalk"
+error_message = "DingTalk pairing failed. Generate a new code and try again."
+connection_success_message = "DingTalk is connected. You can chat with IronClaw by messaging the robot in a single chat."
+[channel.connection.notices]
+connect_required = "👋 Connect this DingTalk account to IronClaw first: generate a code from the DingTalk extension in IronClaw, then send it to me here."
+paired = "✅ DingTalk connected. You can talk to IronClaw right here."
+already_paired_same_user = "✅ This DingTalk account is already connected to your IronClaw user."
+already_bound_to_other_user = "This DingTalk account is already connected to another IronClaw user."
+expired_or_unknown = "This pairing code is expired or unknown. Generate a new code from the DingTalk extension in IronClaw."
+# Notices (pairing feedback, "connect first") and, later, replies are sent as
+# DingTalk robot messages through the OpenAPI send path below.
+[channel.reply]
+transport = "message"
+[channel.delivery]
+transport = "message"
+[channel.ingress.stream]
+url_template = "{endpoint}?ticket={ticket}"
+# UNVERIFIED (ADR §14 / §8 item 5; verified in Task 20): this single gateway
+# host is the operator's decision and has not been probed. It is exact, never a
+# wildcard (ADR 1.2). If it is wrong the connection is refused by policy and the
+# extension shows "needs administrator" with a clear reason.
+hosts = ["wss-open-connection.dingtalk.com"]
+# UNVERIFIED limits (ADR §8 item 6): conservative host-side caps, not
+# DingTalk's.
+max_frame_bytes = 262144
+max_frames_per_second = 50
+[channel.ingress.stream.connect]
+method = "post"
+path = "/v1.0/gateway/connections/open"
+# `clientId`/`clientSecret` ride body_credentials (host-injected); the host adds
+# `subscriptions`. `localIp` (sent by the official SDK) is omitted: whether it is
+# required is unverified.
+body = { ua = "ironclaw" }
+body_credentials = ["dingtalk_client_id", "dingtalk_client_secret"]
+[channel.ingress.stream.response]
+endpoint = "/endpoint"
+ticket = "/ticket"
+[[channel.ingress.stream.subscriptions]]
+type = "CALLBACK"
+topic = "/v1.0/im/bot/messages/get"
+# The official SDK pings every 60 seconds.
+[channel.ingress.stream.keepalive]
+ping_interval_secs = 60
+pong_timeout_secs = 10
+[[channel.egress]]
+scheme = "https"
+host = "api.dingtalk.com"
+methods = ["post"]
+paths = ["/v1.0/gateway/connections/open"]
+request_body_limit_bytes = 8192
+response_body_limit_bytes = 8192
+[[channel.egress.body_credentials]]
+handle = "dingtalk_client_id"
+pointer = "/clientId"
+[[channel.egress.body_credentials]]
+handle = "dingtalk_client_secret"
+pointer = "/clientSecret"
+# The access-token exchange endpoint (official Go SDK, oauth2_1_0
+# `GetAccessToken`: `{appKey, appSecret}` in, `{accessToken, expireIn}` out).
+# ClientID is the AppKey; both values are injected host-side.
+[[channel.egress]]
+scheme = "https"
+host = "api.dingtalk.com"
+methods = ["post"]
+paths = ["/v1.0/oauth2/accessToken"]
+request_body_limit_bytes = 4096
+response_body_limit_bytes = 16384
+[[channel.egress.body_credentials]]
+handle = "dingtalk_client_id"
+pointer = "/appKey"
+[[channel.egress.body_credentials]]
+handle = "dingtalk_client_secret"
+pointer = "/appSecret"
+# Robot sends (official Go SDK, robot_1_0 `BatchSendOTO` / `OrgGroupSend`).
+# The host exchanges the app credentials for a short-lived token and injects
+# it as `x-acs-dingtalk-access-token`; the adapter only names the handle. A
+# credential_source target cannot also carry body_credentials, so `robotCode`
+# comes from the originating callback (ADR §14.3), not from dingtalk_client_id.
+[[channel.egress]]
+scheme = "https"
+host = "api.dingtalk.com"
+methods = ["post"]
+paths = ["/v1.0/robot/oToMessages/batchSend", "/v1.0/robot/groupMessages/send"]
+request_body_limit_bytes = 65536
+response_body_limit_bytes = 65536
+[channel.egress.credential_source]
+handle = "dingtalk_access_token"
+exchange_host = "api.dingtalk.com"
+token_pointer = "/accessToken"
+expires_in_pointer = "/expireIn"
+[channel.egress.credential_source.exchange]
+method = "post"
+path = "/v1.0/oauth2/accessToken"
+body_credentials = ["dingtalk_client_id", "dingtalk_client_secret"]
+[channel.egress.credential_source.header]
+name = "x-acs-dingtalk-access-token"
+[channel.presentation]
+supports_markdown = false
+supports_threads = false

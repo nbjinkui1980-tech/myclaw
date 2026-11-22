@@ -481,6 +481,74 @@ B 的主要风险是"重复换取的语义未知"。单副本下每次重启最�
 - `NetworkScheme::Wss` 与 `AuthRequirement::AuthenticatedStream` 是新增序列化值。一旦有持久化记录或事件带上这两个值,回退代码会让这些记录无法反序列化。因此在里程碑二上线前,回退应连同停用所有流式渠道一起进行;Task 2、4 的 PR 需要说明哪些持久化位置可能出现这两个值(本 ADR **未枚举**,未验证)。
 - token 交换(B)不持久化,回退无数据残留。
 
+## 14. 修订记录(2026-11-20):钉钉包(里程碑二)的决定
+
+本节只追加,不改动第 1 节到第 7 节的已批准决定,也不改动"批准"和"修订批准"两节。决定人是批准人(用户),由编排者在用户授权的范围内转达。
+
+### 14.1 网关主机:未验证,Task 20 核实
+
+用户选择不做开发期探测。manifest 只声明一个精确主机 `wss-open-connection.dingtalk.com`(不用通配符,遵守 1.2)。**这个主机名没有官方来源,也没有真实建连核对**(第 8 节条目 5 仍为未验证)。如果主机错误,监督器会因"返回主机不在声明列表内"或策略拒绝而失败,连接进入"需要管理员处理",这是可接受的明确失败。Task 20 用一次真实建连核实,核实后更正 manifest 注释、本节和运营者文档。manifest、`manifest.toml` 的注释和运营者文档都必须带"未验证"标记。
+
+### 14.2 组织 ID 规则:无状态等值,fail closed
+
+- **规则。** 一条回调只有在 `chatbotCorpId` 与 `senderCorpId` 都存在、非空且相等时才视为本组织成员并继续(配对、准入);否则一律不准入、不能配对。缺字段视为不满足。实现在 `packages/dingtalk/src/payload.rs`,单聊和群聊共用同一条规则。
+- **被拒消息。** 适配器返回 `InboundOutcome::Ignore`。契约里的 `Ignore` 不带原因码,所以固定原因码(`corp_id_missing`、`sender_outside_bot_org`、`sender_staff_id_missing` 等)写进一条 `tracing` 警告;日志里没有任何 ID、昵称或消息正文。没有改通用层。
+- **理由。** 企业内部应用的机器人只属于一个组织,所以 `chatbotCorpId` 就是本组织;帧来自经连接认证的会话,字段由钉钉提供。外部组织成员(例如跨组织群)的 `senderCorpId` 不同,会被这条规则挡住。
+- **为什么不做"首次见到的组织"进程内 pin,也不加 `dingtalk_corp_id` 管理员字段。** 进程内 pin 重启即失效,对企业内部应用几乎不增加保护,还会让人误以为已持久绑定。管理员字段会多一个运营者步骤。两者都暂不做。这替换了实施计划里"与首次见到的组织一致"的措辞。
+- **未验证。** 第 8 节条目 9(两个字段的含义)仍未验证。如果同组织用户的帧里实际没有 `senderCorpId`,这条规则会把所有消息都拒掉,这是明确可见的失败。
+- **Task 20 核实方法。** 用同组织账号单聊机器人,确认被准入;用外部组织账号(跨组织群或外部联系人)发消息,确认日志里出现 `sender_outside_bot_org` 且不进入配对。
+- **后续。** 如果核实后发现字段语义不同,再决定是否改为管理员显式配置组织 ID(`dingtalk_corp_id`)。已记入实施计划"后续项"。
+
+### 14.3 ClientID 当作秘密保存;robotCode 的观察方式
+
+- 建连请求体和 token 交换请求体里的 `clientId`、`appKey` 只能经 `body_credentials`(秘密句柄)注入。所以 `dingtalk_client_id` 在 `[admin_configuration]` 里声明为 **secret**。ClientID 本身不敏感,这样做的原因是注入路径只接受秘密句柄。运营者只需填写一次 ClientID 和一次 ClientSecret。
+- (2026-11-20 更正)此前曾写"发送侧的 `robotCode` 也由 host 从 `dingtalk_client_id` 注入",这一点做不到,已撤回,见 14.5。
+- 适配器的 `receive` 只能读到非秘密配置,看不到 `clientId`,所以不能在入站时比较 `robotCode == clientId`。**改写第 8 节条目 8b 的核实方式:** 入站只记录 `robotCode` 是否存在,以及同一安装内是否发生变化(只记布尔值,不记取值;日志字段 `robot_code_present`、`robot_code_changed`)。二者是否相等留到 Task 20 核实。
+- 没有采用"再加一个非秘密 ClientID 字段"(运营者要填两次)和"改通用层让 `receive` 看到 `clientId`"。
+
+### 14.4 发送接口与令牌接口:已核对(官方 Go SDK)
+
+来源:`https://github.com/alibabacloud-go/dingtalk`(master 分支),文件 `robot_1_0/client.go` 与 `oauth2_1_0/client.go`。这是阿里云为钉钉 OpenAPI 生成的官方 SDK。"已核对"只表示字段名、路径和方法与该 SDK 一致,不表示钉钉服务端的其他承诺(限流、长度上限、错误码仍未验证)。本节是对第 8 节条目 10 与 11a 的修订记录,第 8 节表格本身不改。
+
+| 接口 | SDK 结构 | 路径与方法 | 请求体字段 | 响应体字段 |
+|---|---|---|---|---|
+| 单聊批量发送 | `BatchSendOTO` | `POST /v1.0/robot/oToMessages/batchSend` | `msgKey`(必填)、`msgParam`(必填,JSON 字符串)、`robotCode`(必填)、`userIds`(必填,数组) | `processQueryKey`、`invalidStaffIdList`、`filteredStaffIdList`、`flowControlledStaffIdList` |
+| 群发送 | `OrgGroupSend` | `POST /v1.0/robot/groupMessages/send` | `msgKey`(必填)、`msgParam`(必填)、`openConversationId`、`robotCode`、`coolAppCode`、`token` | `processQueryKey`(标为必填) |
+| 企业内部应用令牌 | `GetAccessToken` | `POST /v1.0/oauth2/accessToken` | `appKey`(必填)、`appSecret` | `accessToken`、`expireIn`(int64) |
+
+- 两个发送接口都通过请求头 `x-acs-dingtalk-access-token` 携带令牌(SDK 的 `BatchSendOTOHeaders`、`OrgGroupSendHeaders`)。令牌接口本身不带令牌(`AuthType: Anonymous`)。
+- `msgParam` 的形状只来自 SDK 注释里的示例:`sampleText` 为 `{"content"}`,`sampleMarkdown` 为 `{"title","text"}`。完整的消息类型表未核对。
+- 单条消息长度上限、限流、错误码含义仍**未验证**。实现按 3000 个字符分片(按字符边界);429 可重试;5xx 标为 `sent_unverified`,不重发(2026-11-20 复核后修订:5xx 时钉钉可能已经送达,重试会重复发送);401 在 host 的单次令牌刷新之后仍失败时视为未授权;其他 4xx 为永久失败;单聊响应里的 `invalidStaffIdList`/`filteredStaffIdList` 包含收件人时为永久失败,`flowControlledStaffIdList` 包含收件人时可重试。
+- 成功证据是 `processQueryKey`。2xx 但缺少它、2xx 但不是 JSON、或请求可能已发出但没读到响应,一律标为 `sent_unverified`(`PartDeliveryOutcome::Ambiguous`),适配器不重发。是否有可用 `processQueryKey` 回读的查询接口,本次没有核对,未做回读。
+- 与 ADR 和计划的假设没有冲突。
+
+### 14.5 发送侧 robotCode 取自回调(2026-11-20)
+
+- **决定。** 发送请求里的 `robotCode` 取自原始回调的 `robotCode`。入站时把它写进 `reply_context`,回复和系统通知(配对反馈、"请先连接")都从 `reply_context` 读取。`reply_context` 缺失、无法解析、属于另一个会话,或其中没有 `robotCode` 时,发送在发出任何请求之前按 `Permanent` 失败。`robotCode` 不是秘密,但不写进日志、审计或错误原因。
+- **原因。** 发送目标必须声明 `[channel.egress.credential_source]` 才能拿到令牌头,而 `ChannelDescriptor` 的校验(`CredentialSourceWithStaticCredential`)不允许同一目标再声明 `body_credentials`、`credential_handle` 或 `injection`。所以 host 无法把 `dingtalk_client_id` 注入发送请求体的 `/robotCode`,适配器又看不到 `clientId`。没有改通用层。
+- **与第 8 节条目 8a 的关系。** SDK 在发送接口里把 `robotCode` 取为 `clientId`。回调里的 `robotCode` 按定义就是该机器人的编码,所以两者在企业内部应用下预期相同;是否相等仍在 Task 20 核实(14.3 的存在性与稳定性观察保留)。
+- **对 Task 18(主动推送)的影响。** 主动推送没有入站上下文。允许的推送目标本来就只来自先前的入站会话(调用者本人的单聊、机器人已在场的群),所以计划在 `outbound_target_provider` 列出目标和 `PreferenceTargetCodec` 编码目标时,把该会话 `reply_context` 里的 `robotCode` 一起带上,解码时严格校验格式。如果这样做需要改通用层(契约、registry、host egress)或新增 test-support 字段,Task 18 开工时停下来报告。
+
+
+### 14.6 群聊 @机器人(Task 17,2026-11-21)
+
+- **准入。** 群消息只有在 `isInAtList` 为 JSON `true` 时才继续(其余形态,包括缺失、`null`、字符串,都视为未 @,返回已认证的 no-op,固定原因码 `group_message_not_addressed`)。组织 ID 规则与单聊共用(14.2)。触发原因为 `BotMention`,所以配对拦截器不会处理群里的验证码(配对只在单聊),未配对者由通用层发"请先连接"提示,并按会话限频。
+- **去掉 @ 前缀。** `atUsers` 只有 ID 没有显示名。只有当 `atUsers` 恰好一项(被 @ 的只能是机器人)时,才去掉文本开头的 `@名字` 词;多于一项时开头的 `@名字` 可能是别人,保持原文。钉钉是否把 @ 文本放进 `text.content`(夹具里 `content` 以空格开头,看起来没有)**未验证,Task 20 核实**。
+- **外部成员(批准人已接受,2026-11-21)。** 外部组织成员的消息被组织 ID 规则挡住(固定原因码,无任何 ID),既不进入准入也不能配对,**不会收到任何提示**。这与计划原先"外部成员只收到提示"不同:适配器没有发给外部成员的安全通道,向外部组织发消息本身也不合适。运营者文档如实写明。
+- **临时可见通知。** 钉钉没有群内仅某人可见的发送。通用层把未配对者的"请先连接"以 `EphemeralTo(发送者)` 要求投递;适配器把它改成发给该成员本人的单聊(`oToMessages/batchSend`,`userIds=[该成员]`),不发到群里。`EphemeralTo` 的 actor 类型不是本渠道的 actor 时,不发送,按 `Permanent` 失败。批准人已接受:外部成员已被前置规则挡住,所以收到私信的只会是本组织成员。限频沿用通用层现有机制,**按会话**(同一个群在窗口内最多一条),不是按成员;按成员限频需要通用层改动或持久状态,记入计划后续项 13。发送失败只让这次通知失败,不影响群消息的准入。
+### 14.7 主动推送:只做本人单聊(Task 18,2026-11-21)
+
+- **策略。** 批准人选择:只能推送到调用者本人的单聊,经现有通用 outbound-target provider(它只列出调用者自己已配对、已预置的单聊目标)实现。不新增包内 provider,不依赖 `ironclaw_outbound`,不新增持久状态,不改通用层。
+- **群聊推送暂不可用。** 原计划还允许"机器人已在场且调用者是成员的群"。通用 provider 有意不提供共享会话目标(`channel_outbound_targets.rs` 头部:这类目标的每用户归属来自已退役的订阅绑定,重新引入需要"调用者在该会话里有绑定"的参与关系规则),而判断成员关系需要入站时写入的成员记录。这是通用层变更,需要单独设计和评审,记入计划后续项 12。包内的 `group:<conversationId>` 编解码已写好并有测试,但没有任何路径产出或解析群目标。
+- **DM 编码改为 `dm:<staffId>:<conversationId>`(原计划 `dm:<staffId>`)。** 投递协调器按会话指纹读取入站时存下的 `reply_context`,发送所需的 `robotCode` 就在其中(14.5)。只有 staffId 的编码解出的会话没有对应上下文,推送会在发出任何请求之前失败。通用 provider 调用 `encode_personal_direct_message_target` 时本来就传入单聊会话和 staffId,所以不改通用层。
+- **严格解码。** 前缀(`dm`/`group`)、分段数(`dm` 三段,`group` 两段)、staffId(ASCII 字母数字与 `_-.`,至多 64 字节)、conversationId(ASCII 字母数字与 `+/=_-.`,至多 160 字节,不含 `:`)逐段校验;多余分段、空段、空白、控制字符、非 ASCII 一律解码为空。
+- **失败关闭。** `reply_context` 缺失、无法解析、属于另一个会话或没有 `robotCode` 时,推送在发出请求前按 `Permanent` 失败。
+- **未验证。** staffId 与 conversationId 的真实字符集和长度没有官方来源(第 8 节);上面的限制是保守的包内规则,Task 20 若发现真实 ID 被拒再放宽。
+
+### 14.8 加固与文档(Task 19,2026-11-21)
+- 不改动第 1 到 7 节的决定。实现复核:包内生产代码没有 `.unwrap()`/`.expect()`、字节切片或丢失原因的 `map_err(|_| …)`;分片按字符边界(`render.rs`);回调文本上限 `MAX_TEXT_BYTES`;帧大小和速率由 manifest 的 `max_frame_bytes`、`max_frames_per_second` 与监督器约束(未验证的保守值,第 8 节条目 6)。
+- `msgId` 重复投递:事件 ID 取自 `msgId`,重复回调得到同一事件 ID,由通用准入账本结算(`acme` 流式夹具的重复帧集成测试覆盖通用路径,包内测试 `a_redelivered_callback_keeps_one_event_id_and_a_new_msg_id_gets_another` 覆盖映射)。
+- 运营者文档(公开页 `docs/channels/dingtalk.mdx`、中文页 `docs/zh/channels/dingtalk.mdx`)已写。网关主机名、权限点名称和 @ 文本形态仍标"未验证,Task 20 核实"。文档如实写明:外部成员不收提示(14.6)、主动推送只到本人单聊(14.7,群推送为后续项 12)。
 ## 附录:实测命令与完整清单
 
 以下内容来自 Task 1 的实测记录(工作区临时文件,不进入仓库,此处为全文转录)。写 ADR 时我在同一文件集合上重跑了关键计数:Rust 文件 2333 个;`route_suffix` 或 `.verification`(精确)30 个;`NetworkScheme` 68 个;`AuthRequirement`(词边界)106 行、**30** 个文件(原记录第 3.2 节写的"29 个文件"有误,清单 C 实际列出 30 个,本附录已更正);`VendorAuthRecipe`(词边界)26 个。
@@ -861,3 +929,15 @@ tests/support/reborn_parity_qa/network.rs
 | Task 10 测试注入点 | "A" | 为集成测试增加一个 `cfg(test-support)` 注入点(`with_stream_connector_for_test`),并把棘轮的三个冻结计数各上调 1。这一项对应的是里程碑一更早的 Task 10 提交,不在本轮复核的差异里,这里只是补记批准 |
 
 记录说明:本节由助手按批准人在会话中的明确回复写入,批准人可直接修改措辞。
+
+### 修订记录(2026-11-22,评审修复)
+原"批准"与"修订批准"两节的文字未改动;本节只追加。以下是批准人对双模型评审(分支 `dingtalk-channel`)的决定。
+
+| 评审编号 | 决定 | 依据与未核实事项 |
+|---|---|---|
+| #2 | 429 与 `flowControlledStaffIdList` 保持 `Retryable`,不改成 `Ambiguous` | 依据:按 HTTP 惯例,429 表示服务端没有处理该请求;改成未确认会让限流期间的回复永远发不出去。**未经钉钉官方文档或实测核实。** 与 5xx 不同,5xx 没有这条惯例可依,所以仍是 `Ambiguous`。风险:如果钉钉可以在受理消息后再限流,重试会产生一条重复消息。该问题已写入计划 Task 20 的核实清单,并如实写在 `send.rs` 的模块文档里。 |
+| #4 | 不再从 `text.content` 去掉开头的 `@` 标记,原文交给模型 | 钉钉是否把 @机器人 写进 `text.content` 仍未核实,当前选择是不做任何删除:多出一个可见的 `@机器人` 只是噪声,丢掉用户输入的 `@Alice` 是丢失信息。已写入 Task 20 核实清单。 |
+| #1 | 建连目标不再声明 `credential_handle` | 建连凭证只通过 `body_credentials` 注入请求体;目标级凭证会让主机额外把 ClientSecret 作为 `Authorization: Bearer` 头发出。manifest 层和集成层都有断言。 |
+| #3 | 不作为阻塞项 | 仓库 CI 的各测试任务统一设置 `RUST_MIN_STACK=67108864`,里程碑一的集成测试同样依赖它;测试文件头注释写明这一依赖。 |
+| #14 | 本任务不处理 | 架构测试按目录名查找边界规则是通用缺陷(`docs/internal/gate-audit-2026-08.md` 已记录,slack、telegram 同样受影响);记入计划"后续项"。 |
+

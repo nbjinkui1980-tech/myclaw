@@ -98,7 +98,8 @@
                 "pages": [
                   "channels/overview",
                   "channels/slack",
-                  "channels/telegram"
+                  "channels/telegram",
+                  "channels/dingtalk"
                 ]
               },
               {
@@ -242,7 +243,8 @@
                 "icon": "message",
                 "pages": [
                   "zh/channels/overview",
-                  "zh/channels/telegram"
+                  "zh/channels/telegram",
+                  "zh/channels/dingtalk"
                 ]
               },
               {

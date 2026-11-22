@@ -842,6 +842,7 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_sandbox", "runtimes"),
     ("ironclaw_secrets", "substrates"),
     ("ironclaw_skills", "loops"),
+    ("ironclaw_dingtalk_extension", "products"),
     ("ironclaw_slack_extension", "products"),
     ("ironclaw_stress", "app"),
     ("ironclaw_telegram_extension", "products"),

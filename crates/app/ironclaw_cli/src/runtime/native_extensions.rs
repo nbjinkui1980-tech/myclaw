@@ -11,6 +11,7 @@ use ironclaw_composition::{
     ChannelExtensionBinding, FirstPartyChannelInitializationContext,
     FirstPartyChannelInitializationError, FirstPartyChannelInitializer,
 };
+use ironclaw_dingtalk_extension::dingtalk_channel;
 use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_host::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, LoadContext,
@@ -27,7 +28,10 @@ use secrecy::ExposeSecret as _;
 /// Every native factory the binary assembles (`first_party`-runtime
 /// extensions bind their adapters through these).
 pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensionFactory>> {
-    vec![Arc::new(TelegramExtensionFactory)]
+    vec![
+        Arc::new(TelegramExtensionFactory),
+        Arc::new(DingTalkExtensionFactory),
+    ]
 }
 
 /// The binary-assembled channel extension set.
@@ -78,6 +82,20 @@ pub(crate) fn bundled_channel_extensions(
             outbound_target_provider: None,
             first_party_initializer: None,
             registration_document_path: None,
+        },
+        {
+            // The package's one assembly of the four halves plus the codec
+            // (DingTalk plan Task 18: no package-owned outbound-target
+            // provider; the generic provider offers the caller's own DM).
+            let dingtalk = dingtalk_channel();
+            ChannelExtensionBinding {
+                extension_id: ExtensionId::from_trusted("dingtalk".to_string()),
+                surfaces: dingtalk.surfaces,
+                preference_target_codec: Some(dingtalk.preference_target_codec),
+                outbound_target_provider: None,
+                first_party_initializer: None,
+                registration_document_path: None,
+            }
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("web-app".to_string()),
@@ -179,6 +197,34 @@ impl FirstPartyChannelInitializer for WebAppChannelInitializer {
         Ok(Some(serde_json::json!({
             "vapid_public_key": parsed.public_key_b64url,
         })))
+    }
+}
+
+/// `runtime.service = "dingtalk.extension/v1"`: the DingTalk robot channel.
+/// It has no tools and no device link, and reads no secret at load: the host
+/// owns the stream connection and the token exchange.
+struct DingTalkExtensionFactory;
+
+#[async_trait::async_trait]
+impl NativeExtensionFactory for DingTalkExtensionFactory {
+    fn service(&self) -> &str {
+        "dingtalk.extension/v1"
+    }
+
+    async fn load(&self, _ctx: &LoadContext) -> Result<Box<dyn ExtensionEntrypoint>, BindError> {
+        Ok(Box::new(DingTalkExtensionEntrypoint))
+    }
+}
+
+struct DingTalkExtensionEntrypoint;
+
+impl ExtensionEntrypoint for DingTalkExtensionEntrypoint {
+    fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+        Ok(ExtensionBindings {
+            tools: None,
+            channel: dingtalk_channel().surfaces,
+            device_link: None,
+        })
     }
 }
 
@@ -314,6 +360,37 @@ mod tests {
                 .iter()
                 .any(|factory| factory.service() == "telegram.extension/v1"),
             "the binary assembles the telegram factory"
+        );
+    }
+
+    #[test]
+    fn dingtalk_factory_and_binding_bind_every_channel_half() {
+        let factories = bundled_native_extension_factories();
+        assert!(
+            factories
+                .iter()
+                .any(|factory| factory.service() == "dingtalk.extension/v1"),
+            "the binary assembles the dingtalk factory"
+        );
+        let bindings = bundled_channel_extension_bindings();
+        let dingtalk = bindings
+            .iter()
+            .find(|binding| binding.extension_id.as_str() == "dingtalk")
+            .expect("the binary supplies the dingtalk deployment channel binding");
+        assert!(dingtalk.surfaces.ingress.is_some());
+        assert!(dingtalk.surfaces.reply.is_some());
+        assert!(dingtalk.surfaces.delivery.is_some());
+        assert!(
+            dingtalk.preference_target_codec.is_some(),
+            "push targets decode through the dingtalk codec"
+        );
+        assert!(
+            dingtalk.outbound_target_provider.is_none(),
+            "the generic provider offers the caller's own DM; no package provider"
+        );
+        assert!(
+            dingtalk.surfaces.stream_control.is_some(),
+            "the stream connection's frame control is bound"
         );
     }
 

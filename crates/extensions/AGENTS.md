@@ -1,6 +1,6 @@
 # `crates/extensions/` — everything "installable package"
 
-**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, the channel packages) · **Crates:** 9 (re-derive: `find crates/extensions -maxdepth 3 -name Cargo.toml | wc -l` — 4 family crates + 5 crate-bearing packages under `ls -d crates/extensions/packages/*/`, which lists 15 packages total) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
+**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, the channel packages) · **Crates:** 10 (re-derive: `find crates/extensions -maxdepth 3 -name Cargo.toml | wc -l` — 4 family crates + 6 crate-bearing packages under `ls -d crates/extensions/packages/*/`, which lists 16 packages total) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
 
 ## What this family is
 
@@ -49,6 +49,7 @@ follows here is family-specific and has no root-file counterpart:
 | [`ironclaw_extension_support`](./ironclaw_extension_support) | Shared support for the bundled packages: the `PACKAGES` inventory and the native tool *executors* (gsuite, web-access, coding, skills) — not itself a package | you add native, non-WASM tool logic for a data-only package |
 | [`packages/slack`](./packages/slack) (`ironclaw_slack_extension`) | Protocol-only Slack channel capabilities: complete webhook ingress, replies streamed through the native Agent surface (`[channel.reply] transport = "stream"`), and target-resolved message delivery | Slack-shaped bytes only |
 | [`packages/telegram`](./packages/telegram) (`ironclaw_telegram_extension`) | Telegram Bot API channel capabilities plus the linked-account MTProto device flow and 15 personal-account tools | Telegram-shaped bytes and linked-account provider behavior only |
+| [`packages/dingtalk`](./packages/dingtalk) (`ironclaw_dingtalk_extension`) | DingTalk Stream-mode channel capabilities for an enterprise-internal robot: Stream frame control, callback ingress (single chat and group @mention), the OpenAPI send path, code pairing, the reply sink, and own-single-chat push targets | DingTalk-shaped bytes only |
 | [`packages/web-app`](./packages/web-app) (`ironclaw_web_app_extension`) | Delivery-only browser-push translator; authenticated-session ingress is host-owned (the one required absence), and its `stream` reply sink is the product projection sink composition attaches to the binding's `surfaces.reply` slot | Web Push-shaped bytes only |
 | [`packages/memory-native`](./packages/memory-native) (`ironclaw_memory_native`) | The default `[memory]` provider: filesystem-backed `MemoryService` implementation | the bundled memory backend's behavior |
 | [`packages/mem0`](./packages/mem0) (`ironclaw_memory_mem0`) | The alternative `[memory]` provider over an external mem0 REST service | the mem0 mapping or its hardened transport |
@@ -75,7 +76,7 @@ time:
 
 **Anatomy.** `manifest.toml` always; `prompts/` and `schemas/` for the
 model-visible copy and tool schemas; `Cargo.toml` + `src/` + `tests/` only in
-the four crate-bearing packages; `wasm/` + `wasm-src/` only where tools compile
+the six crate-bearing packages; `wasm/` + `wasm-src/` only where tools compile
 to a WASM guest. The **artifact boundary**: committed `wasm/*.wasm` guests are
 built out-of-band (`./scripts/build-wasm-extensions.sh --first-party` — the
 `wasm-src/` guest crates are excluded from the workspace build graph), and
@@ -88,6 +89,7 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 
 | Package | Extension id | Surfaces (tools / channel / auth) | Vendor | Runtime | Code |
 |---|---|---|---|---|---|
+| `dingtalk/` | `dingtalk` | channel only (`[channel.ingress.stream]` Stream-mode ingress, message `[channel.reply]`/`[channel.delivery]` over OpenAPI with a `credential_source` token exchange, `web_generated_code` pairing; deployment credentials via `[admin_configuration]`) | — | first_party | crate `ironclaw_dingtalk_extension` |
 | `github/` | `github` | 49 tools | `github` | wasm | data-only |
 | `gmail/` | `gmail` | 6 tools | `google` | first_party | data-only (executor: `extension_support::gsuite`) |
 | `google-calendar/` | `google-calendar` | 9 tools | `google` | first_party | data-only (executor: `extension_support::gsuite`) |

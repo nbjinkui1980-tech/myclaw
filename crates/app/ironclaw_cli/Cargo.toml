@@ -69,6 +69,7 @@ ironclaw_extension_manager = { path = "../../extensions/ironclaw_extension_manag
 # product-auth ownership move.
 ironclaw_extension_support = { path = "../../extensions/ironclaw_extension_support", version = "0.1.0" }
 ironclaw_auth = { path = "../../domains/ironclaw_auth", version = "0.1.0" }
+ironclaw_dingtalk_extension = { path = "../../extensions/packages/dingtalk", version = "0.1.0" }
 ironclaw_slack_extension = { path = "../../extensions/packages/slack", version = "0.1.0" }
 ironclaw_telegram_extension = { path = "../../extensions/packages/telegram", version = "0.1.0" }
 ironclaw_web_app = { path = "../../domains/ironclaw_web_app", version = "0.1.0" }

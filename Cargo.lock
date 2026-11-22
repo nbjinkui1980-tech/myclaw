@@ -3719,6 +3719,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_composition",
  "ironclaw_config",
+ "ironclaw_dingtalk_extension",
  "ironclaw_extension_contracts",
  "ironclaw_extension_host",
  "ironclaw_extension_manager",
@@ -4110,6 +4111,22 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_dingtalk_extension"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_extension_contracts",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-test",
 ]
 
 [[package]]
@@ -4611,6 +4628,7 @@ dependencies = [
  "ironclaw_composition",
  "ironclaw_config",
  "ironclaw_conversations",
+ "ironclaw_dingtalk_extension",
  "ironclaw_event_log",
  "ironclaw_event_projections",
  "ironclaw_event_store",

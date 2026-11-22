@@ -26,6 +26,7 @@ allowlist="$(
                 or (.name == "ironclaw_architecture_tests")
                 or (.name == "ironclaw_slack_extension")
                 or (.name == "ironclaw_telegram_extension")
+                or (.name == "ironclaw_dingtalk_extension")
                 or (.name | startswith("ironclaw_webui"))
               )
               and (.name != "ironclaw_integration_tests")

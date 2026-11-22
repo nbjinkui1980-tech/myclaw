@@ -60,7 +60,6 @@ scheme = "https"
 host = "api.acme.example"
 methods = ["post"]
 paths = ["/v1/streams/open"]
-credential_handle = "acme_client_secret"
 request_body_limit_bytes = 8192
 response_body_limit_bytes = 8192
 

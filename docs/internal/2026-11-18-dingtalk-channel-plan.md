@@ -24,7 +24,7 @@
 - **部署模型(2026-11-20 确认,选 A)**:钉钉渠道的真实需求是让**其他运营者**用**他们自己组织的钉钉**对接消息网关。每个运营者自己部署 IronClaw,对接自己组织的钉钉企业内部应用,凭证由该部署的管理员在 `[admin_configuration]` 里填写。一个部署只对接**一个**钉钉组织。
   - 这与现有设计一致,通用层和钉钉包的结构不变。Stream 模式不要求公网入口,正适合自托管的运营者。
   - **范围外**:同一个部署服务多个钉钉组织(每个组织各自的应用凭证)、以及上架钉钉应用市场的第三方企业应用。这两种都会触发 overview §1080 表中"一个部署需要多个由管理员选择的实例"所要求的新 ADR,本计划不做。
-  - **设计假设要写进文档和代码**:`senderStaffId` 只在一个钉钉企业内部唯一,所以身份键沿用 `senderStaffId` 的前提是"一个部署对应一个组织"。为了在这个前提被误用时尽早失败,Task 12 和 Task 17 校验回调里的 `chatbotCorpId`/`senderCorpId` 与首次见到的组织一致(具体规则由 Task 1 核实后确定),不一致的消息不进入准入并记录脱敏的审计事件。
+  - **设计假设要写进文档和代码**:`senderStaffId` 只在一个钉钉企业内部唯一,所以身份键沿用 `senderStaffId` 的前提是"一个部署对应一个组织"。为了在这个前提被误用时尽早失败,Task 12 和 Task 17 采用无状态规则(2026-11-20 决定,见 ADR 第 14.2 节):回调里的 `chatbotCorpId` 与 `senderCorpId` 必须都存在、非空且相等,否则不进入准入、不能配对(缺字段即拒绝),并以固定原因码记录一条不含任何 ID 的日志。不做进程内 pin,也不加管理员字段。
   - **新增交付物**:面向外部运营者的上手文档(见 Task 19),并在 Task 20 里按文档从零走一遍来验证。
 
 ## 待决事项
@@ -295,12 +295,12 @@ flowchart LR
   - 创建包目录。复制 Telegram 的 `Cargo.toml` 结构,`layer = "products"`,依赖集与 Slack 一致,加入 workspace。写 `README.md`、`AGENTS.md`(含 `CLAUDE.md` 指针)。
   - `manifest.toml`:
     - `schema_version = "reborn.extension_manifest.v3"`,`id = "dingtalk"`,`[runtime] kind = "first_party"`,`service = "dingtalk.extension/v1"`。
-    - `[admin_configuration]`:`dingtalk_client_id`、`dingtalk_client_secret`(secret)。是否另需 RobotCode 由 Task 1 决定。说明文案写明 Stream 模式不需要公网地址,不要照搬 Telegram 的公网 HTTPS 要求。
+    - `[admin_configuration]`:`dingtalk_client_id`、`dingtalk_client_secret`,**两者都是 secret**(注入路径只接受秘密句柄,见 ADR 第 14.3 节)。是否另需 RobotCode 由 Task 1 决定。说明文案写明 Stream 模式不需要公网地址,不要照搬 Telegram 的公网 HTTPS 要求。
     - `[channel]` 的 `commands` 与 Telegram 一致。
     - 流式入站声明:建连路径 `/v1.0/gateway/connections/open`,订阅主题 `/v1.0/im/bot/messages/get`,WebSocket 主机来自 Task 1 的结论。
     - `[[channel.egress]]` 指向 `api.dingtalk.com`,带精确 `paths` 和体积上限,并按 Task 11 声明令牌来源和注入头。
   - `stream.rs`:实现帧控制,`SYSTEM` 帧回 ACK,`disconnect` 返回 `Reconnect`,`CALLBACK` 帧交出 `data`。
-  - `payload.rs` 和 `ChannelIngress::receive`:解析单聊文本。actor 用 `senderStaffId`,`msgId` 作 `ExternalEventId`,`reply_context` 写入会话、收件人和会话类型。按 Task 1 的结论校验 `chatbotCorpId`。
+  - `payload.rs` 和 `ChannelIngress::receive`:解析单聊文本。actor 用 `senderStaffId`,`msgId` 作 `ExternalEventId`,`reply_context` 写入会话、收件人和会话类型。按无状态组织规则(ADR 第 14.2 节)校验:`chatbotCorpId` 与 `senderCorpId` 必须都存在、非空且相等,否则返回已认证的 no-op(固定原因码,不记 ID)。
   - 为新 crate 增加 `BoundaryRule`,并验证它不会像 slack 和 telegram 那样因目录名匹配而静默跳过(见 `docs/internal/gate-audit-2026-08.md`)。
   - 在 `docs/internal/reborn/target-architecture/PROPOSAL.md` 写带日期的修订,使 `python3 scripts/ci/check-target-tree.py` 通过。
   - 编辑 `crates/AGENTS.md`、`crates/extensions/AGENTS.md` 的计数前,先运行 `rg -l '<file>' crates/app/ironclaw_architecture_tests/tests scripts/ci`。
@@ -318,7 +318,7 @@ flowchart LR
   - `render.rs`:纯文本和 Markdown 渲染(`sampleText`/`sampleMarkdown`),按 Task 1 核实的长度上限分片,按字符边界切分。
   - `channel.rs`:`ChannelDelivery::deliver` 调用 `oToMessages/batchSend`,令牌由 host 注入。
   - 成功证据:保存返回的 `processQueryKey`。请求已发出但响应丢失等歧义情况,标记为未验证(参照 Telegram 的 `sent_unverified`),不自动重发。若 Task 1 确认有可用的查询接口,再评估回读。
-  - 错误分类:限流和 5xx 为可重试,权限和参数错误为 `Permanent`,令牌失效交给 Task 11 的单次刷新。
+  - 错误分类:限流(429)为可重试;5xx 标为未验证、不重发(钉钉可能已经送达,2026-11-20 复核后修订);权限和参数错误为 `Permanent`,令牌失效交给 Task 11 的单次刷新。
   - manifest 增加 `[channel.delivery]`、`[channel.presentation]`。
 - 测试(先写):假 egress 断言请求体、路径和令牌头;分片边界(含多字节字符);错误分类;歧义失败不重发;一致性套件的投递部分。
 - Demo:一条通知产生带令牌头的 `batchSend`,歧义失败被标记为未验证且不重发。
@@ -361,24 +361,23 @@ flowchart LR
 - 指导:
   - 识别 `conversationType`、`isInAtList`、`conversationId`,去掉文本里的 @机器人 前缀。
   - 会话引用用 `conversationId`。共享会话准入采用 presence-based 模式(参照 Telegram manifest 的注释):经连接认证的帧即成员证据,每个参与者以自己的身份运行。未配对者收到提示,提示按会话限频。
-  - 只允许本组织成员(有 `senderStaffId` 且企业 ID 匹配)配对;外部成员只收到提示。
+  - 只允许本组织成员(有 `senderStaffId` 且通过同一条无状态组织规则)配对;外部成员只收到提示。
   - 未 @ 的群消息返回已认证的 no-op,并带原因。
   - 回复走 `groupMessages/send`,群标识来自 `reply_context`。
   - 群成员文本按不可信文本处理,与 Slack 和 Telegram 一致。
 - 测试(先写):单元测试覆盖 @、未 @、多人、去前缀、外部成员、畸形字段;集成测试中两个已配对用户各自 @ 机器人,消息进入各自身份,回复发到 `groupMessages/send`。
 - Demo:群里 @ 机器人得到回复,没 @ 的消息不触发 agent。
 
-#### Task 18: 主动推送
+#### Task 18: 主动推送(单聊)
 
-- 目标:agent 能通过 `builtin.outbound_deliver` 向允许的用户或群推送。
+- 目标:agent 能通过 `builtin.outbound_deliver` 向调用者本人的单聊推送。群聊推送本任务不做(见后续项 12 和 ADR 14.7)。
 - 指导:
-  - **先定授权策略**:默认只允许推送给调用者本人的单聊,以及机器人已在场且调用者是成员的群。写进 ADR 和用户文档。
-  - `PreferenceTargetCodec`:`dm:<staffId>`、`group:<conversationId>` 的编码和解码,严格校验,不信任展示字符串。
-  - `outbound_target_provider`:参照 Telegram 的 `telegram_outbound_targets`(未配对时列表为空)。
-  - `ChannelDelivery::deliver` 按目标类型走 `oToMessages/batchSend` 或 `groupMessages/send`,限流映射为可重试。
-  - 接入 Task 16 的绑定。
-- 测试(先写):编解码往返和畸形输入;授权策略的允许和拒绝(跨用户、未在场的群);deliver 请求体;集成测试对允许目标推送成功、对未授权目标被拒。
-- Demo:`builtin.outbound_deliver` 推送到允许的目标,未授权目标被拒绝。
+  - **授权策略(2026-11-21 修订)**:只能推送到调用者本人的单聊。经现有通用 outbound-target provider 实现:它只列出调用者自己已配对、已预置的单聊目标。不新增包内 provider,不依赖 `ironclaw_outbound`,不新增持久状态,不改通用层。原计划的"机器人已在场且调用者是成员的群"需要通用层的参与关系规则,已移入后续项。
+  - `PreferenceTargetCodec`:`dm:<staffId>:<conversationId>` 和 `group:<conversationId>` 的编码与解码,按前缀、分段数、字符集和长度逐段严格校验,不信任展示字符串。`group:` 只做编解码,供将来使用,本任务没有任何路径产出或解析群目标。DM 编码比原计划多了 `conversationId`:投递按会话指纹读取入站时存下的 `reply_context`,`robotCode` 就在里面(ADR 14.5);只有 staffId 的编码解出的会话找不到上下文。
+  - `ChannelDelivery::deliver` 复用 Task 13 的发送路径;`reply_context` 缺失或缺 `robotCode` 时失败关闭。限流映射为可重试。
+  - 接入 Task 16 的二进制绑定(只接 `preference_target_codec`,`outbound_target_provider` 保持 `None`)。参照 Slack 和 Telegram 的绑定(两者的 `outbound_target_provider` 也是 `None`);计划里原先引用的 `telegram_outbound_targets` 已不存在,通用 provider 现在承担这件事。
+- 测试(先写):编解码往返和畸形输入;推送请求体里的 `userIds`、`robotCode` 来自该会话的 `reply_context`;缺上下文或缺 `robotCode` 失败关闭;他人会话的上下文被拒;集成测试(`dingtalk_push_reaches_only_the_callers_own_single_chat`):对本人单聊推送成功(令牌头、请求体),对他人单聊和群目标被拒且没有任何发送。
+- Demo:`builtin.outbound_deliver` 推送到本人单聊,其他目标被拒绝。
 
 #### Task 19: 加固、文档与全量门禁
 
@@ -410,6 +409,9 @@ flowchart LR
   - 依次验证:验证码配对、单聊、群里 @机器人、未 @ 被忽略、推送到允许的目标、令牌过期自动刷新、断网后自动重连、停用后连接关闭。
   - 验证"一个部署一个组织"的保护:用另一个组织的账号向机器人发消息(如果条件允许),确认企业 ID 不一致的消息被拒绝并留下脱敏的审计事件;凭证错误时状态进入"需要管理员处理",文档里写的处理办法确实有效。
   - 记录实际限流和长度限制,与 Task 1 对比,有出入则修订夹具和文档。
+  - **核实清单(2026-11-22 评审修复追加)**:
+    - 429 与单个收件人限流(`flowControlledStaffIdList`)时,钉钉是否可能已经投递了消息?当前按"未处理"归为可重试(`send.rs`),依据只是 HTTP 惯例,未经官方文档或实测核实;如果可能已投递,改为 `Ambiguous`(ADR 2026-11-22 修订记录 #2)。
+    - 钉钉是否把 @机器人 写进 `text.content`?当前选择是不做任何删除(评审 #4),如果确认会写入,再决定是否按机器人名称精确去除。
 - 测试:手动验收清单;发现的缺陷补回归测试。
 - Demo:在真实钉钉里完成上述全部场景,并且一位只读文档的运营者独立完成了对接。
 
@@ -438,6 +440,9 @@ flowchart LR
 8. **集成层缺口的说明要带进 PR 的 Test Strategy**:刷新时序只在 host 层用暂停时间测试;令牌交换的集成夹具从入站 egress 发送,没有经过 `ReplySink`。
 9. **主线上的 `cargo deny` advisories 本来就失败**(61 到 62 条,`wasmtime`、`zip`、`rustls` 等,与本计划无关)。要单独更新 `deny.toml` 的忽略列表或升级依赖。
 10. **既有文档里的过期引用**:`docs/internal/qa/telegram-coverage-map.md` 引用了不存在的 `reborn_integration_telegram_journey`。
+11. **组织规则的适用性(2026-11-20)**。如果 Task 20 发现无状态组织规则不适用(例如同组织用户的帧里没有 `senderCorpId`),考虑增加 `dingtalk_corp_id` 管理员字段,由运营者显式配置组织 ID(ADR 第 14.2 节)。
+12. **群聊主动推送**:需要通用层的参与关系目标规则("调用者在该会话里有绑定")和入站时写入的成员记录。通用 outbound-target provider 现在有意不提供共享会话目标(见 `channel_outbound_targets.rs` 头部说明),包内也不能自己持有成员状态。属于通用层变更,需要单独设计和评审。包内的 `group:<conversationId>` 编解码已就绪。
+13. **未配对成员提示的按成员限频**:通用的"请先连接"提示按会话限频(同一群在窗口内最多一条),不是按成员。若要按成员限频,需要通用层的改动或持久状态。
 
 ## 备选方案:HTTP 回调模式(未采用)
 
@@ -462,3 +467,4 @@ flowchart LR
 | M5 | 多副本语义未核实 | Task 1 设为门槛,不满足则只承诺单副本 |
 | M6 | 契约 crate 大小上限必然触发 | Task 3 和 4 在 PR 中写明提高上限的理由;复用 `receive` 减少新增量 |
 | L | 管理员文案、overview 文案、`robotCode` 与企业 ID 规则、任务体量 | Task 12 修正文案;Task 19 更新 overview;Task 1 核实字段;原 Task 6/7 拆为 Task 6 到 9 |
+14. **架构测试按目录名查找边界规则(2026-11-22,评审 #14)**:`reborn_boundary_rules_active_crates_are_workspace_members` 按目录名而不是 Cargo 包名解析规则,目录名与包名不同的包(slack、telegram、dingtalk)被跳过(已记录在 `docs/internal/gate-audit-2026-08.md`)。`dingtalk_boundary_rule_is_armed` 只是给钉钉单独补的一条;通用修复(按包名通过 `cargo metadata` 解析,并去掉 `forbidden.len() > 20` 的数量替代判断)属于通用层改动,需要单独评审。

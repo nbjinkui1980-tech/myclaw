@@ -1810,7 +1810,7 @@ fn acme_stream_fixture_parses_with_a_stable_digest() {
     // Pinned: editing the fixture is a reviewed change to every stream test.
     assert_eq!(
         ironclaw_host_api::approval::sha256_digest_token(ACME_STREAM_MANIFEST.as_bytes()),
-        "sha256:09aebd9a01034791556b6b056dc92a7b53ab1d3ab761f856a5e18dbcbaf8539a"
+        "sha256:54cc187c2935cca6017289efa360ad397c131bb3350dc119c0da7a565b7032f4"
     );
 }
 #[test]
@@ -1897,6 +1897,39 @@ fn manifests_without_a_source_resolve_without_the_key() {
             "{name} must resolve byte-identically: no credential_source key"
         );
     }
+}
+#[test]
+fn dingtalk_package_manifest_parses_as_a_stream_channel() {
+    // Read at run time for the same reason as `manifests_without_a_source_...`.
+    let path = format!(
+        "{}/../packages/dingtalk/manifest.toml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+    let record = parse_v3(&text).expect("the dingtalk package manifest must parse");
+    let resolved = record.resolved();
+    let channel = resolved.channel.as_ref().expect("channel declared");
+    let ingress = channel.ingress.as_ref().expect("ingress declared");
+    let stream = ingress.stream().expect("stream transport declared");
+    assert!(ingress.route_suffix().is_none());
+    assert_eq!(stream.hosts, ["wss-open-connection.dingtalk.com"]);
+    assert_eq!(stream.connect.path, "/v1.0/gateway/connections/open");
+    assert_eq!(
+        stream
+            .subscriptions
+            .iter()
+            .map(|s| (s.kind.as_str(), s.topic.as_str()))
+            .collect::<Vec<_>>(),
+        [("CALLBACK", "/v1.0/im/bot/messages/get")]
+    );
+    // Sends use the host-exchanged token (Task 13).
+    let source = token_source_of(resolved);
+    assert_eq!(source.handle.as_str(), "dingtalk_access_token");
+    assert_eq!(source.header.name, "x-acs-dingtalk-access-token");
+    let json = serde_json::to_string(resolved).expect("resolved serializes");
+    let stored: ironclaw_extension_registry::ResolvedExtensionManifest =
+        serde_json::from_str(&json).expect("resolved deserializes");
+    assert_eq!(&stored, resolved);
 }
 #[test]
 fn the_token_declaration_changes_the_manifest_digest() {
