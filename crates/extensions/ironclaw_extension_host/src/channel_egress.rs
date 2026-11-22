@@ -7,12 +7,23 @@
 //! Policy (allowlisting, header screening, handle equality) already ran in
 //! `ironclaw_extension_host`; this module only resolves material and drives
 //! the transport. Adapters never see secret bytes.
+//!
+//! A target that declares `[channel.egress.credential_source]` gets its token
+//! from [`token_exchange::TokenExchangeEgressCredentials`] instead of a stored
+//! secret: exchanged at the declared endpoint, held in memory only, injected
+//! into the declared header, replaced once and the request resent once after a
+//! 401. 5xx, 429 and timeouts are never retried. See that module for the cache
+//! semantics, error mapping, and the residual copies on the shared response path.
+
+pub mod token_exchange;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
-use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransport};
+use ironclaw_extension_host::egress::{
+    ApprovedChannelEgress, ApprovedCredentialSource, ChannelEgressTransport,
+};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     http::{RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest},
@@ -43,6 +54,48 @@ pub trait ChannelEgressCredentialsPort: Send + Sync {
         installation_id: &str,
         handle: &SecretHandle,
     ) -> Result<Option<SecretMaterial>, ChannelEgressCredentialError>;
+
+    /// The exchanged, in-memory-only token for a declared credential source.
+    ///
+    /// Only [`token_exchange::TokenExchangeEgressCredentials`] answers this; a
+    /// port without it fails closed, so a source declared on a deployment that
+    /// did not wire the decorator never reaches the network unauthenticated.
+    /// Implementations that wrap another port must forward this method.
+    async fn exchanged_token(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+        _source: &ApprovedCredentialSource,
+        _refresh: TokenRefresh,
+    ) -> Result<ExchangedToken, ChannelEgressCredentialError> {
+        Err(ChannelEgressCredentialError::TokenSourceUnavailable)
+    }
+}
+
+/// Whether a caller accepts a cached token or demands a replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenRefresh {
+    /// Reuse the cached token until its refresh time.
+    IfStale,
+    /// The request that used `generation` was rejected: drop that token (only
+    /// if it is still the cached one) and exchange again.
+    Invalidate { generation: u64 },
+}
+
+/// A token for one outbound request. `generation` identifies which cached
+/// token it came from, so a rejection invalidates only that token. Debug never
+/// shows the material.
+pub struct ExchangedToken {
+    pub material: SecretMaterial,
+    pub generation: u64,
+}
+
+impl std::fmt::Debug for ExchangedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExchangedToken")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Typed credential-resolution failures (never carry secret material).
@@ -50,6 +103,20 @@ pub trait ChannelEgressCredentialsPort: Send + Sync {
 pub enum ChannelEgressCredentialError {
     #[error("channel credential backend unavailable")]
     Unavailable,
+    /// No decorator in this port chain can exchange tokens.
+    #[error("channel token source unavailable")]
+    TokenSourceUnavailable,
+    /// The token endpoint refused the app credentials (401/403) or they are
+    /// not configured.
+    #[error("channel token exchange rejected the application credentials")]
+    ExchangeRejected,
+    /// A transient exchange failure: timeout, network error, 408/429/5xx, or
+    /// an unusable response.
+    #[error("channel token exchange unavailable")]
+    ExchangeUnavailable,
+    /// A permanent declaration problem: policy denial, redirect, other status.
+    #[error("channel token exchange is misdeclared")]
+    ExchangeMisdeclared,
 }
 
 /// Generic credentials port over the scoped secret store.
@@ -180,6 +247,18 @@ impl ChannelEgressCredentialsPort for BridgedChannelEgressCredentials {
             .channel_secret(extension_id, installation_id, handle)
             .await
     }
+
+    async fn exchanged_token(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+        source: &ApprovedCredentialSource,
+        refresh: TokenRefresh,
+    ) -> Result<ExchangedToken, ChannelEgressCredentialError> {
+        self.fallback
+            .exchanged_token(extension_id, installation_id, source, refresh)
+            .await
+    }
 }
 
 /// Fixed `(extension_id, handle) → material` mapping, registered as a bridge
@@ -250,6 +329,50 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
         &self,
         approved: ApprovedChannelEgress,
     ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+        let Some(source) = approved.credential_source.clone() else {
+            return self.dispatch(&approved, None).await;
+        };
+        let token = self
+            .credentials
+            .exchanged_token(
+                &approved.extension_id,
+                &approved.installation_id,
+                &source,
+                TokenRefresh::IfStale,
+            )
+            .await
+            .map_err(|error| token_exchange::map_exchange_error(error, &source))?;
+        let generation = token.generation;
+        let response = self.dispatch(&approved, Some(token)).await?;
+        // Only an explicit 401 means the token was refused. 5xx, 429, and
+        // timeouts are never retried: the request may already have had its
+        // effect, and a second send would repeat it.
+        if response.status != 401 {
+            return Ok(response);
+        }
+        let token = self
+            .credentials
+            .exchanged_token(
+                &approved.extension_id,
+                &approved.installation_id,
+                &source,
+                TokenRefresh::Invalidate { generation },
+            )
+            .await
+            .map_err(|error| token_exchange::map_exchange_error(error, &source))?;
+        // One retry, no more: whatever this answers is returned as-is.
+        self.dispatch(&approved, Some(token)).await
+    }
+}
+
+impl HostRuntimeChannelEgressTransport {
+    /// Resolve the stored credentials, add the exchanged token if there is one,
+    /// and drive one request through the host runtime egress.
+    async fn dispatch(
+        &self,
+        approved: &ApprovedChannelEgress,
+        token: Option<ExchangedToken>,
+    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
         let extension_id = ExtensionId::new(&approved.extension_id).map_err(|_| {
             RestrictedEgressError::Transport {
                 reason: "invalid extension id for channel egress".to_string(),
@@ -265,11 +388,13 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
         // The primary declared credential plus every declared body credential
         // this call opted into resolve through the same port and ride the
         // same host-runtime injection path; each is required, fail-closed.
-        let approved_credentials = approved
+        // With an exchange source the primary credential is the token, not a
+        // stored secret, so it is injected from the exchanged material below.
+        let stored_primary = approved
             .credential
             .iter()
-            .chain(approved.body_credentials.iter());
-        for credential in approved_credentials {
+            .filter(|_| approved.credential_source.is_none());
+        for credential in stored_primary.chain(approved.body_credentials.iter()) {
             let material = self
                 .credentials
                 .channel_secret(
@@ -297,6 +422,17 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
                 required: true,
             });
         }
+        if let Some(token) = token {
+            let Some(declared) = &approved.credential else {
+                return Err(RestrictedEgressError::PolicyDenied);
+            };
+            credentials.push(HostRuntimeCredentialMaterial {
+                handle: declared.handle.clone(),
+                material: token.material,
+                target: declared.target.clone(),
+                required: true,
+            });
+        }
 
         let response = self
             .host_egress
@@ -308,13 +444,13 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
                     scope: self.request_scope(),
                     capability_id,
                     method: approved.method,
-                    url: approved.url,
-                    headers: approved.headers,
-                    body: approved.body,
+                    url: approved.url.clone(),
+                    headers: approved.headers.clone(),
+                    body: approved.body.clone(),
                     network_policy: NetworkPolicy {
                         allowed_targets: vec![NetworkTargetPattern {
                             scheme: Some(NetworkScheme::Https),
-                            host_pattern: approved.host,
+                            host_pattern: approved.host.clone(),
                             port: None,
                         }],
                         deny_private_ip_ranges: true,
@@ -544,6 +680,7 @@ mod tests {
             request_body_limit: None,
             response_body_limit: 64 * 1024,
             timeout_ms: 5_000,
+            credential_source: None,
         }
     }
 

@@ -344,3 +344,110 @@ impl ResolvedExtensionManifest {
         })
     }
 }
+
+/// How one resolved contract's declared authority changed between versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedContractChange {
+    /// The declared authority is identical.
+    Equal,
+    /// Every authority the new contract declares was already declared.
+    Narrowed,
+    /// The new contract declares authority the old one did not (including any
+    /// change that is neither a strict subset nor equal).
+    Widened,
+}
+/// Classify the channel-egress authority change from `old` to `new`.
+///
+/// Scope is the channel-egress axis only: reachable `(scheme, host, method,
+/// path)` grants, credentials and body-credential placements, and exchanged
+/// token sources (a new exchange endpoint, handle set, or injection header is
+/// new authority). Other contract axes are not classified here. This is data
+/// classification: no gate or caller depends on it yet.
+pub fn classify_channel_egress_change(
+    old: &ResolvedExtensionManifest,
+    new: &ResolvedExtensionManifest,
+) -> ResolvedContractChange {
+    let old_atoms = channel_egress_authority(old);
+    let new_atoms = channel_egress_authority(new);
+    if old_atoms == new_atoms {
+        ResolvedContractChange::Equal
+    } else if new_atoms.is_subset(&old_atoms) {
+        ResolvedContractChange::Narrowed
+    } else {
+        ResolvedContractChange::Widened
+    }
+}
+/// Reduce a manifest's channel egress to a set of authority atoms. Each atom is
+/// a canonical string so a change to any component yields a new atom.
+fn channel_egress_authority(
+    manifest: &ResolvedExtensionManifest,
+) -> std::collections::BTreeSet<String> {
+    let mut atoms = std::collections::BTreeSet::new();
+    let Some(channel) = &manifest.channel else {
+        return atoms;
+    };
+    for egress in &channel.egress {
+        let host = egress.host.to_ascii_lowercase();
+        let credential = egress
+            .credential_handle
+            .as_ref()
+            .map_or("-", |handle| handle.as_str());
+        // Serialization of a closed enum cannot fail; a failure would only
+        // make the atom unique, which classifies as widening (fail-safe).
+        let injection = egress
+            .injection
+            .as_ref()
+            .map(|injection| {
+                serde_json::to_string(injection).unwrap_or_else(|_unserializable| "?".to_string())
+            })
+            .unwrap_or_default();
+        let mut grants: Vec<String> = egress
+            .paths
+            .iter()
+            .map(|path| format!("exact:{path}"))
+            .chain(
+                egress
+                    .path_prefixes
+                    .iter()
+                    .map(|prefix| format!("prefix:{prefix}")),
+            )
+            .collect();
+        if grants.is_empty() {
+            grants.push("any".to_string());
+        }
+        for method in &egress.methods {
+            for grant in &grants {
+                atoms.insert(format!(
+                    "reach|{:?}|{host}|{method}|{grant}|{credential}|{injection}",
+                    egress.scheme
+                ));
+            }
+        }
+        for body in &egress.body_credentials {
+            atoms.insert(format!(
+                "body|{host}|{}|{}",
+                body.handle.as_str(),
+                body.pointer
+            ));
+        }
+        if let Some(source) = &egress.credential_source {
+            let mut handles: Vec<&str> = source
+                .exchange
+                .body_credentials
+                .iter()
+                .map(|handle| handle.as_str())
+                .collect();
+            handles.sort_unstable();
+            atoms.insert(format!(
+                "source|{host}|{}|{}|{:?}|{}|{}|{}",
+                source.handle.as_str(),
+                source.exchange_host.to_ascii_lowercase(),
+                source.exchange.method,
+                source.exchange.path,
+                handles.join(","),
+                source.header.name
+            ));
+        }
+    }
+    atoms
+}

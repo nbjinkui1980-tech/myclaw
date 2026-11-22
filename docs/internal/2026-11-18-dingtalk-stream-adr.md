@@ -366,6 +366,17 @@ B 的主要风险是"重复换取的语义未知"。单副本下每次重启最�
 
 **影响的文件或 crate。** `ironclaw_extension_contracts`(`channel.rs` 的 egress 凭证声明、可能的 `egress.rs`)、`ironclaw_extension_registry`(`v3.rs`、`resolved.rs`、digest、升级差异分类)、`ironclaw_extension_host`(`channel_egress.rs` 装饰器、`egress.rs` 的声明校验)、`ironclaw_composition`(装配)。`ironclaw_auth` 不改。
 
+### 6.4 修订记录(2026-11-19):实现确定的细节
+本小节只记录实现阶段确定的细节,不改动 6.1 到 6.3 的决定,也不改动"批准"和"修订批准"两节。实现仍是方案 B,否决 C 不变。
+- **manifest 形状。** `[[channel.egress]]` 上新增可选的 `[channel.egress.credential_source]`:`handle`(逻辑令牌名,不是 `[admin_configuration]` 字段,不落盘)、`exchange_host`、`[...exchange]`(`method` 只允许 `post`,`path`,静态 JSON `body`,`body_credentials` 句柄列表)、`token_pointer`、`expires_in_pointer`(单位秒,必填)、`[...header]`(`name` 为小写 RFC 7230 token,可选 `prefix`)。与同一目标上的 `credential_handle`、`injection`、`body_credentials` 互斥。换取端点必须恰好匹配另一个已声明的 https egress 目标(主机、POST、路径),且该目标为每个换取句柄声明了 `body_credentials` 指针;该目标自己不能再带 `credential_source`。声明里没有任何厂商字段名,指针完全来自 manifest。
+- **装饰器的字面实现。** 没有改 `ironclaw_host_api` 或 `ironclaw_network` 的共享类型。`ChannelEgressCredentialsPort`(host crate 内)新增带默认实现的 `exchanged_token`,默认返回 `TokenSourceUnavailable`(失败即关闭);`TokenExchangeEgressCredentials` 包在 `ChannelConfigEgressCredentials`(测试时再包 `Bridged`)外面,是最外层,`channel_secret` 直接转发,`BridgedChannelEgressCredentials` 转发 `exchanged_token`。策略层 `egress.rs` 在请求按令牌句柄选择时批准一个声明的 `Header` 目标并附带不含秘密的 `ApprovedCredentialSource`;声明的令牌头名在该目标上成为 host 独占头。
+- **常量。** 有效期取响应里 `expires_in_pointer` 指向的正整数(JSON 数字或纯数字字符串),缺失、零、负数或无法解析时取 300 秒;再夹到 60 秒到 24 小时之间;提前刷新余量为 `min(300秒, 有效期/5)`,即在 `有效期 - 余量` 后重新换取。令牌响应体上限 16 KiB(取它与换取目标声明上限的较小值);缓存按 `(extension, installation, handle, 换取 URL)` 为键,LRU 容量 256。
+- **单飞与重试。** 每个键一把 `tokio` 互斥锁,持锁期间执行换取,等待者拿到新令牌;该锁只保护进程内缓存,不涉及后端读改写,不适用 CAS 规则。发送被 401 拒绝时,只作废本次请求所用的那一代令牌(并发的多个 401 只换取一次),换取后重发一次,第二次响应原样返回。5xx、429、超时、传输错误一律不重试。除 401 之外,契约里没有声明"令牌失效"信号,本次也没有发明。
+- **错误映射。** 换取返回 401/403 或应用凭证未配置:`AuthRequired`,`required_secrets` 为换取句柄;408、429、5xx、网络与超时、响应不是 JSON、缺令牌、令牌含非可见 ASCII 或超过 4096 字节:`Transport`,原因固定为 `token exchange unavailable`;3xx、404 等其他状态、策略拒绝、响应超限、缺少声明:`PolicyDenied`。所有原因都是静态字符串,不含状态体、令牌、密钥或 URL 查询。失败不做负缓存,下一次发送重新尝试。
+- **服务端语义未验证。** 重复换取是否返回同一令牌、`expireIn` 的精确含义,仍是未验证项(第 8 节条目 11,Task 20 实测)。实现不依赖它们:令牌只用到刷新时间点,换取之后绝不假设旧令牌仍有效,401 后总是重新换取。
+- **残留副本(按"修订批准"中的 X 处理)。** 令牌响应与建连响应走同一条共享 HTTP 响应路径,没有改共享响应类型。`ironclaw_network` 的 `transport.rs` 以 `Vec<u8>` 累积响应体,`RuntimeHttpEgressResponse.body` 持有一份,reqwest、hyper、rustls 的内部缓冲与内核套接字缓冲也会留下副本,这些都不由本实现清零。host 自己持有的副本已清零:响应体用 `Zeroizing` 包裹,令牌从解析树中 `take` 出来后无拷贝地移入缓存的 `SecretString`,注入请求头的材料随请求释放;解析树 `serde_json::Value` 是多出来的一份中间副本(令牌已被取走,其余字段仍在)。
+- **改动面确认。** `ironclaw_extension_contracts`(新模块 `channel_credential_source`)、`ironclaw_extension_registry`(v3 检查与 `classify_channel_egress_change`)、`ironclaw_extension_host`(`egress.rs`、`channel_egress.rs`、`channel_egress/token_exchange.rs`,以及三处构造声明出站的位置改用 `from_descriptors`)、`ironclaw_composition`(最外层装饰器装配)。`ironclaw_auth` 与共享网络、host_api 类型未改。
+- **继承的重定向行为(独立复核发现,批准人 2026-11-20 决定记为后续项)。** 换取请求走共享的 `ironclaw_network` HTTP 出站,它最多跟随 3 次经策略放行的同主机重定向,307/308 会保留方法和请求体。换取请求体里此时已经注入了应用密钥,所以同一已声明主机上的另一个路径会再收到一次带密钥的 POST。影响限于已声明的换取主机,不是外泄路径,但"换取不跟随重定向"这个说法不是字面成立的。本实现没有改共享网络层。后续项:换取请求拒绝任何 3xx(见实施计划"后续项")。
 ## 7. 威胁模型
 
 **决定。** 采用下表列出的六项威胁及其控制,每项控制都落到具体 Task 并由测试断言。其中 7.1 的主机检查与 7.6 的"身份只来自连接所有权"是硬性前提,不得因进度放宽。

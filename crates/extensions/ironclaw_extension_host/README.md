@@ -42,7 +42,14 @@ Grouped by responsibility (all modules are `pub`; see `src/lib.rs`):
   (`channel_host.rs`, the ingress reconciler), delivery ports
   (`run_delivery_ports.rs`, `channel_delivery.rs`), egress transports
   (`egress.rs`, `channel_egress.rs` — credentials injected by the host at send
-  time), identity + actor resolution (`ProviderIdentityActorResolver`,
+  time; `channel_egress/token_exchange.rs` — for a declared
+  `[channel.egress.credential_source]` the host exchanges the app credentials
+  for a short-lived token, caches it in memory only (never persisted, logged or
+  shown to adapters), refreshes it at `ttl - min(300s, ttl/5)` with `ttl`
+  clamped to 60s..24h (300s when the response has no usable lifetime),
+  single-flights one exchange per installation and source, and on a 401 forces
+  one replacement exchange and one resend; 5xx, 429 and timeouts are never
+  retried), identity + actor resolution (`ProviderIdentityActorResolver`,
   `provider_identity.rs`), and the pairing / connection / config / admin-config
   service cores (`channel_pairing*`, `channel_connection.rs`,
   `channel_config.rs`, `admin_configuration_*`).

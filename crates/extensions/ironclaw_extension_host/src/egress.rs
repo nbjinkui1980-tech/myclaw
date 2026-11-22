@@ -63,6 +63,50 @@ pub struct DeclaredChannelEgress {
     pub path_prefixes: Vec<String>,
     pub request_body_limit_bytes: Option<u64>,
     pub response_body_limit_bytes: Option<u64>,
+    /// Declared token exchange for this target, with the exchange endpoint
+    /// already resolved against the sibling declarations. `None` when the
+    /// target declares none or its exchange endpoint could not be resolved
+    /// (the source is then unusable: requests naming it are rejected).
+    pub credential_source: Option<DeclaredCredentialSource>,
+}
+
+/// A target's declared token source, resolved against its exchange target.
+#[derive(Debug, Clone)]
+pub struct DeclaredCredentialSource {
+    pub handle: SecretHandle,
+    pub exchange_host: String,
+    pub exchange_path: String,
+    /// Static JSON object sent as the exchange body, before host-side
+    /// credential insertion.
+    pub exchange_body: Option<serde_json::Value>,
+    /// Exchange body credentials with their declared RFC 6901 pointers.
+    pub exchange_credentials: Vec<ApprovedChannelCredential>,
+    pub exchange_request_limit: Option<u64>,
+    pub exchange_response_limit: Option<u64>,
+    pub token_pointer: String,
+    pub expires_in_pointer: String,
+    pub header_name: String,
+    pub header_prefix: Option<String>,
+}
+
+/// The exchange half of an approved plan: everything the host needs to obtain
+/// the token, none of it secret. Debug is safe: it holds handles and static
+/// declarations only, never material.
+#[derive(Debug, Clone)]
+pub struct ApprovedCredentialSource {
+    /// Logical token name the adapter opted into.
+    pub handle: SecretHandle,
+    pub url: String,
+    pub host: String,
+    pub method: NetworkMethod,
+    /// Serialized static exchange body; secrets are inserted host-side.
+    pub body: Vec<u8>,
+    /// App credentials with `BodyJsonPointer` targets, resolved host-side.
+    pub credentials: Vec<ApprovedChannelCredential>,
+    pub request_body_limit: Option<u64>,
+    pub response_body_limit: u64,
+    pub token_pointer: String,
+    pub expires_in_pointer: String,
 }
 
 /// The credential part of an approved plan: the declared handle plus the
@@ -100,6 +144,10 @@ pub struct ApprovedChannelEgress {
     pub request_body_limit: Option<u64>,
     pub response_body_limit: u64,
     pub timeout_ms: u64,
+    /// Present when the adapter opted into an exchanged token: `credential`
+    /// then carries the declared header target for the token, whose material
+    /// the transport obtains from this source rather than from a stored secret.
+    pub credential_source: Option<ApprovedCredentialSource>,
 }
 
 /// Executes approved plans. Implemented by composition over the host runtime
@@ -176,27 +224,45 @@ impl PolicyEnforcedChannelEgress {
             if HOST_OWNED_HEADERS
                 .iter()
                 .any(|owned| name.eq_ignore_ascii_case(owned))
+                || declared
+                    .credential_source
+                    .as_ref()
+                    .is_some_and(|source| name.eq_ignore_ascii_case(&source.header_name))
             {
                 return Err(RestrictedEgressError::HostOwnedHeader { name: name.clone() });
             }
         }
-        let credential = match (&request.credential, &declared.credential_handle) {
-            (None, _) => None,
-            (Some(handle), Some(declared_handle)) if handle == declared_handle => {
-                Some(ApprovedChannelCredential {
-                    handle: handle.clone(),
-                    target: declared.injection.clone().unwrap_or_else(|| {
-                        RuntimeCredentialTarget::Header {
-                            name: "authorization".to_string(),
-                            prefix: Some("Bearer ".to_string()),
-                        }
-                    }),
-                })
-            }
-            (Some(handle), _) => {
-                return Err(RestrictedEgressError::UndeclaredCredential {
-                    handle: handle.as_str().to_string(),
-                });
+        let opted_in_source = declared
+            .credential_source
+            .as_ref()
+            .filter(|source| request.credential.as_ref() == Some(&source.handle));
+        let credential = if let Some(source) = opted_in_source {
+            Some(ApprovedChannelCredential {
+                handle: source.handle.clone(),
+                target: RuntimeCredentialTarget::Header {
+                    name: source.header_name.clone(),
+                    prefix: source.header_prefix.clone(),
+                },
+            })
+        } else {
+            match (&request.credential, &declared.credential_handle) {
+                (None, _) => None,
+                (Some(handle), Some(declared_handle)) if handle == declared_handle => {
+                    Some(ApprovedChannelCredential {
+                        handle: handle.clone(),
+                        target: declared.injection.clone().unwrap_or_else(|| {
+                            RuntimeCredentialTarget::Header {
+                                name: "authorization".to_string(),
+                                prefix: Some("Bearer ".to_string()),
+                            }
+                        }),
+                    })
+                }
+                (Some(handle), _) => {
+                    return Err(RestrictedEgressError::UndeclaredCredential {
+                        handle: handle.as_str().to_string(),
+                    });
+                }
             }
         };
         let mut body_credentials = Vec::new();
@@ -249,8 +315,38 @@ impl PolicyEnforcedChannelEgress {
                 .unwrap_or(CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES)
                 .min(ironclaw_extension_contracts::channel::MAX_CHANNEL_EGRESS_TRANSFER_BYTES),
             timeout_ms: CHANNEL_EGRESS_TIMEOUT_MS,
+            credential_source: opted_in_source.map(approved_source).transpose()?,
         })
     }
+}
+
+/// Render the exchange half of a plan from the declared source. The body is
+/// the manifest's static JSON object; secrets are inserted later, host-side.
+fn approved_source(
+    source: &DeclaredCredentialSource,
+) -> Result<ApprovedCredentialSource, RestrictedEgressError> {
+    let body = match &source.exchange_body {
+        Some(body) => serde_json::to_vec(body),
+        None => serde_json::to_vec(&serde_json::Value::Object(serde_json::Map::new())),
+    }
+    // A manifest-declared JSON value always serializes; failing closed keeps
+    // the error path total without a panic.
+    .map_err(|_serialize| RestrictedEgressError::PolicyDenied)?;
+    Ok(ApprovedCredentialSource {
+        handle: source.handle.clone(),
+        url: format!("https://{}{}", source.exchange_host, source.exchange_path),
+        host: source.exchange_host.to_ascii_lowercase(),
+        method: NetworkMethod::Post,
+        body,
+        credentials: source.exchange_credentials.clone(),
+        request_body_limit: source.exchange_request_limit,
+        response_body_limit: source
+            .exchange_response_limit
+            .unwrap_or(CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES)
+            .min(ironclaw_extension_contracts::channel::MAX_CHANNEL_EGRESS_TRANSFER_BYTES),
+        token_pointer: source.token_pointer.clone(),
+        expires_in_pointer: source.expires_in_pointer.clone(),
+    })
 }
 
 /// URL structure authorized by a channel egress declaration.
@@ -343,8 +439,70 @@ impl DeclaredChannelEgress {
             path_prefixes: descriptor.path_prefixes.clone(),
             request_body_limit_bytes: descriptor.request_body_limit_bytes,
             response_body_limit_bytes: descriptor.response_body_limit_bytes,
+            credential_source: None,
         }
     }
+
+    /// Lift every declaration of one channel, resolving each target's token
+    /// source against its exchange target in the same list. A source whose
+    /// exchange target cannot be found (descriptor validation rejects this at
+    /// install) resolves to `None`, so requests naming it fail closed.
+    pub fn from_descriptors(
+        descriptors: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
+    ) -> Vec<Self> {
+        descriptors
+            .iter()
+            .map(|descriptor| {
+                let mut declared = Self::from_descriptor(descriptor);
+                declared.credential_source = descriptor
+                    .credential_source
+                    .as_ref()
+                    .and_then(|source| resolve_source(source, descriptors));
+                declared
+            })
+            .collect()
+    }
+}
+
+fn resolve_source(
+    source: &ironclaw_extension_contracts::channel_credential_source::ChannelCredentialSourceDescriptor,
+    descriptors: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
+) -> Option<DeclaredCredentialSource> {
+    let exchange_target = descriptors.iter().find(|candidate| {
+        candidate.credential_source.is_none()
+            && candidate.scheme == NetworkScheme::Https
+            && candidate.host.eq_ignore_ascii_case(&source.exchange_host)
+            && candidate.methods.contains(&NetworkMethod::Post)
+            && DeclaredChannelEgress::from_descriptor(candidate)
+                .matches_recipe_path(&source.exchange.path)
+    })?;
+    let mut exchange_credentials = Vec::new();
+    for handle in &source.exchange.body_credentials {
+        let binding = exchange_target
+            .body_credentials
+            .iter()
+            .find(|binding| &binding.handle == handle)?;
+        exchange_credentials.push(ApprovedChannelCredential {
+            handle: handle.clone(),
+            target: RuntimeCredentialTarget::BodyJsonPointer {
+                pointer: binding.pointer.clone(),
+                post_injection_body_limit_bytes: exchange_target.request_body_limit_bytes,
+            },
+        });
+    }
+    Some(DeclaredCredentialSource {
+        handle: source.handle.clone(),
+        exchange_host: source.exchange_host.clone(),
+        exchange_path: source.exchange.path.clone(),
+        exchange_body: source.exchange.body.clone(),
+        exchange_credentials,
+        exchange_request_limit: exchange_target.request_body_limit_bytes,
+        exchange_response_limit: exchange_target.response_body_limit_bytes,
+        token_pointer: source.token_pointer.clone(),
+        expires_in_pointer: source.expires_in_pointer.clone(),
+        header_name: source.header.name.clone(),
+        header_prefix: source.header.prefix.clone(),
+    })
 }
 
 fn normalized_declared_path(path: &str) -> String {
@@ -377,10 +535,7 @@ impl EgressFactory for TransportBackedEgressFactory {
         Arc::new(PolicyEnforcedChannelEgress::new(
             extension_id,
             installation_id,
-            declared
-                .iter()
-                .map(DeclaredChannelEgress::from_descriptor)
-                .collect(),
+            DeclaredChannelEgress::from_descriptors(declared),
             Arc::clone(&self.transport),
         ))
     }
@@ -423,6 +578,7 @@ mod tests {
             path_prefixes: Vec::new(),
             request_body_limit_bytes: None,
             response_body_limit_bytes: None,
+            credential_source: None,
         }]
     }
 
@@ -816,5 +972,171 @@ mod tests {
             .expect("a genuine sub-path of the declared prefix is allowed");
 
         assert_eq!(transport.approved.lock().unwrap().len(), 1);
+    }
+
+    const TOKEN_CHANNEL: &str = r#"
+id = "messages"
+display_name = "Token messages"
+conversation_model = "continuous"
+[reply]
+transport = "message"
+[[egress]]
+host = "auth.acme.example"
+methods = ["post"]
+paths = ["/v1/oauth/token"]
+response_body_limit_bytes = 4096
+request_body_limit_bytes = 2048
+[[egress.body_credentials]]
+handle = "acme_app_key"
+pointer = "/appKey"
+[[egress.body_credentials]]
+handle = "acme_app_secret"
+pointer = "/appSecret"
+[[egress]]
+host = "api.acme.example"
+methods = ["post"]
+paths = ["/v1/messages"]
+[egress.credential_source]
+handle = "acme_access_token"
+exchange_host = "auth.acme.example"
+token_pointer = "/accessToken"
+expires_in_pointer = "/expireIn"
+[egress.credential_source.exchange]
+method = "post"
+path = "/v1/oauth/token"
+body = { grant = "client" }
+body_credentials = ["acme_app_key", "acme_app_secret"]
+[egress.credential_source.header]
+name = "x-acme-access-token"
+prefix = "Token "
+"#;
+
+    fn token_declared() -> Vec<DeclaredChannelEgress> {
+        let channel: ironclaw_extension_contracts::channel::ChannelDescriptor =
+            toml::from_str(TOKEN_CHANNEL).unwrap();
+        channel.validate().unwrap();
+        DeclaredChannelEgress::from_descriptors(&channel.egress)
+    }
+
+    fn send_request(credential: Option<&str>) -> RestrictedEgressRequest {
+        RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: "https://api.acme.example/v1/messages".to_string(),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: Some(b"{}".to_vec()),
+            credential: credential.map(|handle| SecretHandle::new(handle).unwrap()),
+            body_credentials: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn naming_the_token_handle_approves_the_declared_header_and_exchange_plan() {
+        let (egress, transport) = egress_over(token_declared());
+        egress
+            .send(send_request(Some("acme_access_token")))
+            .await
+            .expect("declared token handle is approved");
+        let approved = transport.approved.lock().unwrap();
+        let plan = &approved[0];
+        let credential = plan.credential.as_ref().expect("token credential");
+        assert_eq!(credential.handle.as_str(), "acme_access_token");
+        assert!(matches!(
+            &credential.target,
+            RuntimeCredentialTarget::Header { name, prefix }
+                if name == "x-acme-access-token" && prefix.as_deref() == Some("Token ")
+        ));
+        let source = plan.credential_source.as_ref().expect("exchange plan");
+        assert_eq!(source.url, "https://auth.acme.example/v1/oauth/token");
+        assert_eq!(source.host, "auth.acme.example");
+        assert_eq!(source.method, NetworkMethod::Post);
+        assert_eq!(source.body, br#"{"grant":"client"}"#);
+        assert_eq!(source.token_pointer, "/accessToken");
+        assert_eq!(source.expires_in_pointer, "/expireIn");
+        assert_eq!(source.request_body_limit, Some(2048));
+        assert_eq!(source.response_body_limit, 4096);
+        let pointers: Vec<(&str, &str)> = source
+            .credentials
+            .iter()
+            .map(|credential| match &credential.target {
+                RuntimeCredentialTarget::BodyJsonPointer { pointer, .. } => {
+                    (credential.handle.as_str(), pointer.as_str())
+                }
+                other => panic!("exchange credential must be a body pointer: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            pointers,
+            [
+                ("acme_app_key", "/appKey"),
+                ("acme_app_secret", "/appSecret")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn not_naming_the_token_handle_keeps_the_request_unchanged() {
+        let (egress, transport) = egress_over(token_declared());
+        egress.send(send_request(None)).await.expect("approved");
+        let approved = transport.approved.lock().unwrap();
+        assert!(approved[0].credential.is_none());
+        assert!(approved[0].credential_source.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_token_handle_is_undeclared_on_targets_without_that_source() {
+        let (egress, transport) = egress_over(token_declared());
+        let mut on_exchange_target = send_request(Some("acme_access_token"));
+        on_exchange_target.url = "https://auth.acme.example/v1/oauth/token".to_string();
+        let error = egress.send(on_exchange_target).await.unwrap_err();
+        assert!(matches!(
+            error,
+            RestrictedEgressError::UndeclaredCredential { .. }
+        ));
+        let error = egress
+            .send(send_request(Some("acme_app_key")))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RestrictedEgressError::UndeclaredCredential { .. }
+        ));
+        assert!(transport.approved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_declared_token_header_is_host_owned_on_a_source_target() {
+        let (egress, transport) = egress_over(token_declared());
+        let mut request = send_request(None);
+        request
+            .headers
+            .push(("X-Acme-Access-Token".to_string(), "forged".to_string()));
+        let error = egress.send(request).await.unwrap_err();
+        assert!(matches!(
+            error,
+            RestrictedEgressError::HostOwnedHeader { .. }
+        ));
+        assert!(transport.approved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_exchange_endpoint_leaves_the_source_unusable() {
+        // A descriptor list that skipped validation (exchange target absent)
+        // must fail closed, not panic or fall back to an unauthenticated send.
+        let mut channel: ironclaw_extension_contracts::channel::ChannelDescriptor =
+            toml::from_str(TOKEN_CHANNEL).unwrap();
+        channel
+            .egress
+            .retain(|target| target.host != "auth.acme.example");
+        let (egress, transport) =
+            egress_over(DeclaredChannelEgress::from_descriptors(&channel.egress));
+        let error = egress
+            .send(send_request(Some("acme_access_token")))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RestrictedEgressError::UndeclaredCredential { .. }
+        ));
+        assert!(transport.approved.lock().unwrap().is_empty());
     }
 }

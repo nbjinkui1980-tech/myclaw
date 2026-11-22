@@ -469,6 +469,11 @@ impl ChannelDescriptor {
                 });
             }
         }
+        for (index, egress) in self.egress.iter().enumerate() {
+            if let Some(source) = &egress.credential_source {
+                source.validate(index, &self.egress)?;
+            }
+        }
         Ok(())
     }
 }
@@ -1033,6 +1038,13 @@ pub struct ChannelEgressDescriptor {
     /// clamps declarations to its global safety ceiling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body_limit_bytes: Option<u64>,
+    /// A short-lived token the host exchanges for application credentials and
+    /// injects into requests to this target. Mutually exclusive with
+    /// `credential_handle`, `injection`, and `body_credentials`; absent for
+    /// every target that does not use token exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_source:
+        Option<crate::channel_credential_source::ChannelCredentialSourceDescriptor>,
 }
 
 /// Maximum request or response body bound a channel manifest may request.
@@ -1040,7 +1052,7 @@ pub struct ChannelEgressDescriptor {
 /// narrower value.
 pub const MAX_CHANNEL_EGRESS_TRANSFER_BYTES: u64 = 10 * 1024 * 1024;
 
-fn valid_egress_path_constraint(
+pub(crate) fn valid_egress_path_constraint(
     path: &str,
     injection: Option<&ironclaw_host_api::http::RuntimeCredentialTarget>,
 ) -> bool {
@@ -1170,6 +1182,14 @@ pub enum ChannelDescriptorError {
     StreamIngressWithWebhookFields,
     #[error("stream ingress field `{field}` is missing, malformed, or out of bounds")]
     InvalidStreamIngress { field: &'static str },
+    #[error(
+        "egress target `{host}` declares a credential_source beside credential_handle, injection, or body_credentials"
+    )]
+    CredentialSourceWithStaticCredential { host: String },
+    #[error(
+        "egress target `{host}` credential_source field `{field}` is missing, malformed, or undeclared"
+    )]
+    InvalidCredentialSource { host: String, field: &'static str },
 }
 
 #[cfg(test)]

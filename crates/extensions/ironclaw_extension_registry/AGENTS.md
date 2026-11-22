@@ -29,7 +29,14 @@ consolidated 2026-08-05 per `docs/internal/reborn/guidance-conventions.md` rule 
   `ExtensionRuntimeV2`, `ManifestSource`, `CapabilityVisibility`,
   `ManifestV2Error`, and the schema-version/size constants. The v3 wire schema
   (`v3`) and the resolved+digested form (`resolved.rs`) the rest of the system
-  reads instead of re-parsing TOML.
+  reads instead of re-parsing TOML. v3 parsing also owns the cross-section
+  checks for `[channel.egress.credential_source]`: every exchange body
+  credential must be a required secret `[admin_configuration]` field, and the
+  exchanged token's own handle must not be one. `classify_channel_egress_change`
+  (`resolved.rs`) classifies the channel-egress authority change between two
+  resolved manifests as `Equal`/`Narrowed`/`Widened`; a new exchange endpoint,
+  token handle set or injection header is widening. It covers the channel-egress
+  axis only and has no caller or gate yet.
 - The durable records (`installations.rs`): installation, membership,
   credential-binding, and **registered package definitions** — rows admitted to
   the catalog with zero installations, carrying their own retention policy

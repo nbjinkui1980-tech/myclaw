@@ -1,0 +1,107 @@
+# The invented-vendor TOKEN-EXCHANGE fixture (milestone 1b Task 11). Same
+# invented vendor as `acme-messenger-stream`, plus a send endpoint whose
+# short-lived access token the host exchanges for the app key/secret at a
+# declared token endpoint and injects into outbound requests. Hosts and
+# handles are part of the inventory the specificity scanner derives from.
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-messenger-token"
+name = "Acme Messenger (token exchange)"
+version = "0.1.0"
+description = "Invented-vendor fixture: a stream-ingress channel with host-side token exchange for the generic extension runtime's supervisor and conformance suites."
+trust = "first_party_requested"
+
+[admin_configuration]
+group_id = "vendor.acme_token"
+display_name = "Acme token deployment configuration"
+description = "Deployment credentials for the Acme token channel."
+fields = [
+  { handle = "acme_client_id", label = "Client ID", secret = false, required = true },
+  { handle = "acme_client_secret", label = "Client secret", secret = true, required = true },
+  { handle = "acme_app_key", label = "App key", secret = true, required = true },
+  { handle = "acme_app_secret", label = "App secret", secret = true, required = true },
+]
+
+[runtime]
+kind = "first_party"
+service = "acme-messenger-token.extension/v1"
+
+[channel]
+id = "messages"
+display_name = "Acme token messages"
+conversation_model = "continuous"
+
+[channel.reply]
+transport = "message"
+
+[channel.ingress.stream]
+url_template = "{endpoint}?ticket={ticket}"
+hosts = ["gateway.acme.example"]
+max_frame_bytes = 262144
+max_frames_per_second = 50
+
+[channel.ingress.stream.connect]
+method = "post"
+path = "/v1/streams/open"
+body = { clientId = "{acme_client_id}" }
+body_credentials = ["acme_client_secret"]
+
+[channel.ingress.stream.response]
+endpoint = "/endpoint"
+ticket = "/ticket"
+
+[[channel.ingress.stream.subscriptions]]
+type = "EVENT"
+topic = "/v1/messages/get"
+
+[channel.ingress.stream.keepalive]
+ping_interval_secs = 60
+pong_timeout_secs = 10
+
+[[channel.egress]]
+scheme = "https"
+host = "api.acme.example"
+methods = ["post"]
+paths = ["/v1/streams/open"]
+credential_handle = "acme_client_secret"
+request_body_limit_bytes = 8192
+response_body_limit_bytes = 8192
+
+[[channel.egress.body_credentials]]
+handle = "acme_client_secret"
+pointer = "/clientSecret"
+
+[[channel.egress]]
+scheme = "https"
+host = "auth.acme.example"
+methods = ["post"]
+paths = ["/v1/oauth/token"]
+request_body_limit_bytes = 4096
+response_body_limit_bytes = 4096
+[[channel.egress.body_credentials]]
+handle = "acme_app_key"
+pointer = "/appKey"
+[[channel.egress.body_credentials]]
+handle = "acme_app_secret"
+pointer = "/appSecret"
+[[channel.egress]]
+scheme = "https"
+host = "api.acme.example"
+methods = ["post"]
+paths = ["/v1/messages"]
+request_body_limit_bytes = 65536
+response_body_limit_bytes = 65536
+[channel.egress.credential_source]
+handle = "acme_access_token"
+exchange_host = "auth.acme.example"
+token_pointer = "/accessToken"
+expires_in_pointer = "/expireIn"
+[channel.egress.credential_source.exchange]
+method = "post"
+path = "/v1/oauth/token"
+body = { grantType = "client_credentials" }
+body_credentials = ["acme_app_key", "acme_app_secret"]
+[channel.egress.credential_source.header]
+name = "x-acme-access-token"
+[channel.presentation]
+supports_markdown = false
+supports_threads = false

@@ -15,7 +15,8 @@ CAS-mutated store out of the crate whose other job is verifying inbound trust.
 ## Public surface
 
 `ExtensionRegistry` (in-memory catalog), `ExtensionManifestV2`/`v3`/
-`ResolvedExtensionManifest` (+ digest), the installation-record store
+`ResolvedExtensionManifest` (+ digest), `classify_channel_egress_change`
+(channel-egress authority diff: equal / narrowed / widened), the installation-record store
 (`installations.rs`, four record classes incl. registered package definitions
 with `PackageDefinitionRetention`), lifecycle vocabulary
 (`ExtensionLifecycleEvent`/`Sink`/`Service`), and the host-API manifest

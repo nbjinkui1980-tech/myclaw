@@ -136,8 +136,9 @@ engine, or the router.
   diff *classifies* the change. A widening consent gate is deliberately **not
   built** (overview §7): host-bundled contracts change only via reviewed binary
   releases, so boot-time adoption of the new record is the accepted path.
-  `diff_resolved_contracts` ships as the data-model seed for a future
-  registry/third-party-distribution trigger.
+  `classify_channel_egress_change` (channel-egress axis only; the broader
+  `diff_resolved_contracts` named earlier was never written) ships as the
+  data-model seed for a future registry/third-party-distribution trigger.
 
 **Tests first:** `manifest_v3_contract.rs` in `ironclaw_extension_registry/tests` —
 v3 Slack-shaped fixture resolves to the same surfaces as its v2 equivalent

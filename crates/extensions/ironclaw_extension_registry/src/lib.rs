@@ -219,8 +219,9 @@ pub use hosted_mcp_discovery::{
     is_hosted_http_mcp_package, package_with_discovered_hosted_mcp_tools,
 };
 pub use resolved::{
-    PackageRootBinding, PackageRootError, ResolvedAuthSurface, ResolvedExtensionManifest,
-    ResolvedHostApiRef, ResolvedMcpDeclaration, ResolvedSectionSurface,
+    PackageRootBinding, PackageRootError, ResolvedAuthSurface, ResolvedContractChange,
+    ResolvedExtensionManifest, ResolvedHostApiRef, ResolvedMcpDeclaration, ResolvedSectionSurface,
+    classify_channel_egress_change,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,

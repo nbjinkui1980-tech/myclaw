@@ -2114,6 +2114,268 @@ pub(crate) fn extension_runtime_acme_stream_tools_profile(
     Ok((profile, egress))
 }
 
+// ── Token-exchange profile (milestone 1b Task 11) ──────────────────────────
+/// The `runtime.service` of the `acme-messenger-token` fixture manifest.
+pub(crate) const ACME_TOKEN_FIXTURE_SERVICE: &str = "acme-messenger-token.extension/v1";
+/// App credentials the fake token endpoint accepts.
+pub(crate) const ACME_TOKEN_APP_KEY: &str = "itest-acme-app-key";
+pub(crate) const ACME_TOKEN_APP_SECRET: &str = "itest-acme-app-secret";
+const ACME_TOKEN_EXCHANGE_PATH: &str = "/v1/oauth/token";
+const ACME_TOKEN_SEND_PATH: &str = "/v1/messages";
+const ACME_TOKEN_PREFIX: &str = "ITEST-ACME-ACCESS-TOKEN-";
+fn acme_token_fixture_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/extensions/acme-messenger-token")
+}
+/// The fake vendor behind the token fixture: a token endpoint that hands out
+/// `ITEST-ACME-ACCESS-TOKEN-<n>` (7200s) only for the accepted app credentials,
+/// and a send endpoint that accepts any issued token the test has not revoked.
+/// Per-test state, so parallel groups never share a vendor.
+#[derive(Default)]
+pub(crate) struct AcmeTokenVendor {
+    exchanges: std::sync::atomic::AtomicUsize,
+    revoked: Mutex<std::collections::HashSet<String>>,
+    /// When non-zero, the token endpoint answers this status instead.
+    token_status: std::sync::atomic::AtomicU16,
+    /// When non-zero, the send endpoint answers this status instead.
+    send_status: std::sync::atomic::AtomicU16,
+}
+impl AcmeTokenVendor {
+    pub(crate) fn token(n: usize) -> String {
+        format!("{ACME_TOKEN_PREFIX}{n}")
+    }
+    pub(crate) fn exchanges(&self) -> usize {
+        self.exchanges.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(crate) fn revoke(&self, token: &str) {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(token.to_string());
+    }
+    pub(crate) fn fail_token_endpoint_with(&self, status: u16) {
+        self.token_status
+            .store(status, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub(crate) fn fail_sends_with(&self, status: u16) {
+        self.send_status
+            .store(status, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn route(&self, request: &ironclaw_network::NetworkHttpRequest) -> Option<(u16, Vec<u8>)> {
+        use std::sync::atomic::Ordering;
+        if request.url.ends_with(ACME_TOKEN_EXCHANGE_PATH) {
+            let forced = self.token_status.load(Ordering::SeqCst);
+            if forced != 0 {
+                return Some((forced, br#"{"error":"unavailable"}"#.to_vec()));
+            }
+            let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+            let accepted = body.get("appKey").and_then(serde_json::Value::as_str)
+                == Some(ACME_TOKEN_APP_KEY)
+                && body.get("appSecret").and_then(serde_json::Value::as_str)
+                    == Some(ACME_TOKEN_APP_SECRET);
+            if !accepted {
+                return Some((401, br#"{"error":"invalid_client"}"#.to_vec()));
+            }
+            let n = self.exchanges.fetch_add(1, Ordering::SeqCst) + 1;
+            return Some((
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "accessToken": Self::token(n),
+                    "expireIn": 7200,
+                }))
+                .ok()?,
+            ));
+        }
+        if request.url.ends_with(ACME_TOKEN_SEND_PATH) {
+            let forced = self.send_status.load(Ordering::SeqCst);
+            if forced != 0 {
+                return Some((forced, br#"{"error":"forced"}"#.to_vec()));
+            }
+            let presented = request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("x-acme-access-token"))
+                .map(|(_, value)| value.clone());
+            let valid = presented.as_deref().is_some_and(|token| {
+                token.starts_with(ACME_TOKEN_PREFIX)
+                    && !self
+                        .revoked
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .contains(token)
+            });
+            return Some(if valid {
+                (200, br#"{"ok":true}"#.to_vec())
+            } else {
+                (401, br#"{"error":"invalid_token"}"#.to_vec())
+            });
+        }
+        hosted_mcp_discovery_fixture_response(request)
+    }
+}
+/// One send the token fixture's adapter made, as the adapter saw it: the
+/// request it built (no token) and the status (or error) it got back.
+#[derive(Debug, Clone)]
+pub(crate) struct AcmeTokenSendRecord {
+    pub(crate) request: RestrictedEgressRequest,
+    pub(crate) outcome: Result<u16, String>,
+}
+/// Everything a token test reads back from the fixture.
+#[derive(Clone)]
+pub(crate) struct AcmeTokenFixture {
+    pub(crate) vendor: Arc<AcmeTokenVendor>,
+    pub(crate) sends: Arc<Mutex<Vec<AcmeTokenSendRecord>>>,
+}
+/// The token fixture's channel adapter: the stream adapter, plus one vendor
+/// send per received event that names the declared token handle. The adapter
+/// sees only the handle name; the host exchanges, caches and injects.
+struct AcmeFixtureTokenAdapter {
+    sends: Arc<Mutex<Vec<AcmeTokenSendRecord>>>,
+}
+impl AcmeFixtureTokenAdapter {
+    fn surfaces(
+        sends: Arc<Mutex<Vec<AcmeTokenSendRecord>>>,
+    ) -> ironclaw_extension_contracts::channel_adapter::ChannelSurfaces {
+        let adapter = Arc::new(Self { sends });
+        ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+            .with_ingress(adapter.clone())
+            .with_stream_control(adapter)
+            .with_reply(Arc::new(AcmeFixtureChannelAdapter))
+    }
+}
+#[async_trait::async_trait]
+impl ironclaw_extension_contracts::channel_adapter::ChannelIngress for AcmeFixtureTokenAdapter {
+    async fn receive(
+        &self,
+        request: ironclaw_extension_contracts::channel_adapter::VerifiedInbound<'_>,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::InboundOutcome,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        let send = RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://api.acme.example{ACME_TOKEN_SEND_PATH}"),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: Some(br#"{"text":"fixture send"}"#.to_vec()),
+            credential: Some(SecretHandle::new("acme_access_token").map_err(|error| {
+                ironclaw_extension_contracts::channel_adapter::ChannelError::Parse {
+                    reason: error.to_string(),
+                }
+            })?),
+            body_credentials: Vec::new(),
+        };
+        let outcome = egress
+            .send(send.clone())
+            .await
+            .map(|response| response.status)
+            .map_err(|error| format!("{error:?}"));
+        self.sends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(AcmeTokenSendRecord {
+                request: send,
+                outcome,
+            });
+        AcmeFixtureChannelAdapter.receive(request, egress).await
+    }
+}
+impl ironclaw_extension_contracts::channel_adapter::ChannelStreamControl
+    for AcmeFixtureTokenAdapter
+{
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::StreamFrameDecision,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        AcmeFixtureStreamAdapter.decode(frame)
+    }
+    fn session_key(&self, data: &[u8]) -> Option<String> {
+        AcmeFixtureStreamAdapter.session_key(data)
+    }
+}
+struct AcmeTokenFixtureFactory {
+    sends: Arc<Mutex<Vec<AcmeTokenSendRecord>>>,
+}
+#[async_trait::async_trait]
+impl ironclaw_extension_host::NativeExtensionFactory for AcmeTokenFixtureFactory {
+    fn service(&self) -> &str {
+        ACME_TOKEN_FIXTURE_SERVICE
+    }
+    async fn load(
+        &self,
+        _ctx: &ironclaw_extension_host::LoadContext,
+    ) -> Result<
+        Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
+        ironclaw_extension_host::BindError,
+    > {
+        Ok(Box::new(AcmeTokenFixtureEntrypoint {
+            sends: Arc::clone(&self.sends),
+        }))
+    }
+}
+struct AcmeTokenFixtureEntrypoint {
+    sends: Arc<Mutex<Vec<AcmeTokenSendRecord>>>,
+}
+impl ironclaw_extension_host::ExtensionEntrypoint for AcmeTokenFixtureEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
+    {
+        Ok(ironclaw_extension_host::ExtensionBindings {
+            tools: None,
+            channel: AcmeFixtureTokenAdapter::surfaces(Arc::clone(&self.sends)),
+            device_link: None,
+        })
+    }
+}
+/// The extension-lifecycle profile extended with the invented-vendor TOKEN
+/// fixture: the stream fixture plus declared host-side token exchange. The
+/// connect call and the token exchange/send both cross the returned recording
+/// egress; the fake vendor and the adapter's send log come back as
+/// [`AcmeTokenFixture`].
+pub(crate) fn extension_runtime_acme_token_tools_profile(
+    connector: Arc<dyn ironclaw_network::WebSocketConnector>,
+) -> HarnessResult<(
+    ToolsProfile,
+    Arc<RecordingNetworkHttpEgress>,
+    AcmeTokenFixture,
+)> {
+    let fixture = AcmeTokenFixture {
+        vendor: Arc::new(AcmeTokenVendor::default()),
+        sends: Arc::new(Mutex::new(Vec::new())),
+    };
+    let router_vendor = Arc::clone(&fixture.vendor);
+    let egress = Arc::new(
+        RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec()).with_vendor_router(
+            Arc::new(move |request| {
+                if request.url.ends_with(ACME_STREAM_CONNECT_PATH) {
+                    return acme_stream_connect_router(request);
+                }
+                router_vendor.route(request)
+            }),
+        ),
+    );
+    let mut profile = extension_lifecycle_tools_profile()?;
+    if let Some(trust) = profile.provider_trust_override.as_mut() {
+        trust.push((
+            ironclaw_host_api::ids::ExtensionId::new("acme-messenger-token")?,
+            standalone_all_effects(),
+        ));
+    }
+    profile.options = profile
+        .options
+        .with_recording_network_egress(Arc::clone(&egress))
+        .with_fixture_extension_dir(acme_token_fixture_dir(), "acme-messenger-token")
+        .with_native_extension_factory(Arc::new(AcmeTokenFixtureFactory {
+            sends: Arc::clone(&fixture.sends),
+        }))
+        .with_stream_connector_for_test(connector);
+    Ok((profile, egress, fixture))
+}
 // ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────
 
 /// The bundled telegram manifest's `runtime.service` id — the same native
