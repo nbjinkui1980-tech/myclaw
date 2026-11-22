@@ -88,5 +88,22 @@ pub(crate) fn bundled_first_party_bundles() -> Vec<FirstPartyPackageBundle> {
         trust_effects: None,
         search_aliases: Vec::new(),
     });
+    // The DingTalk channel package also carries a crate, so it follows the
+    // web-app shape above: the manifest is embedded crate-locally and bundled
+    // here rather than through `ironclaw_extension_support::packages`. The
+    // package ships no prompt or schema assets.
+    bundles.push(FirstPartyPackageBundle {
+        id: "dingtalk".to_string(),
+        display_name: "DingTalk".to_string(),
+        manifest_toml: ironclaw_dingtalk_extension::MANIFEST.to_string(),
+        assets: vec![FirstPartyPackageAsset {
+            path: "manifest.toml".to_string(),
+            bytes: ironclaw_dingtalk_extension::MANIFEST.as_bytes().to_vec(),
+        }],
+        onboarding: None,
+        oauth_setup: None,
+        trust_effects: None,
+        search_aliases: Vec::new(),
+    });
     bundles
 }

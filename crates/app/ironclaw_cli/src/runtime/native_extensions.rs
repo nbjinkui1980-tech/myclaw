@@ -352,6 +352,47 @@ mod tests {
         }
     }
 
+    /// A channel binding the binary assembles is only reachable if the same
+    /// extension is in the first-party catalog: the extensions page, install
+    /// and activation all start from a catalog bundle. A binding without one is
+    /// dead code that every package-level and harness test still passes
+    /// (the harness installs fixtures directly), so pin the pairing here.
+    #[test]
+    fn every_native_channel_binding_has_a_first_party_catalog_bundle() {
+        let catalog: std::collections::BTreeSet<String> =
+            crate::first_party::bundled_first_party_bundles()
+                .into_iter()
+                .map(|bundle| bundle.id)
+                .collect();
+        let missing: Vec<String> = bundled_channel_extension_bindings()
+            .iter()
+            .map(|binding| binding.extension_id.as_str().to_string())
+            .filter(|id| !catalog.contains(id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "channel bindings with no first-party catalog bundle (unreachable from the extensions page): {missing:?}"
+        );
+    }
+
+    #[test]
+    fn the_dingtalk_catalog_bundle_ships_the_package_manifest() {
+        let bundle = crate::first_party::bundled_first_party_bundles()
+            .into_iter()
+            .find(|bundle| bundle.id == "dingtalk")
+            .expect("the dingtalk package is in the first-party catalog");
+        assert_eq!(bundle.display_name, "DingTalk");
+        assert_eq!(bundle.manifest_toml, ironclaw_dingtalk_extension::MANIFEST);
+        assert!(
+            bundle
+                .assets
+                .iter()
+                .any(|asset| asset.path == "manifest.toml"
+                    && asset.bytes == ironclaw_dingtalk_extension::MANIFEST.as_bytes()),
+            "the materialized package root carries manifest.toml"
+        );
+    }
+
     #[test]
     fn telegram_factory_binds_a_channel_and_no_tools() {
         let factories = bundled_native_extension_factories();
