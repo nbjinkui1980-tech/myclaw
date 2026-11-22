@@ -581,6 +581,14 @@ impl RecordingAudit {
         self.kinds().iter().filter(|k| *k == kind).count()
     }
 
+    /// Events of `kind` recorded for one extension.
+    pub fn count_for(&self, extension_id: &str, kind: &StreamAuditKind) -> usize {
+        lock(&self.events)
+            .iter()
+            .filter(|e| e.extension_id == extension_id && e.kind == *kind)
+            .count()
+    }
+
     pub fn rendered(&self) -> String {
         format!("{:?}", lock(&self.events))
     }
