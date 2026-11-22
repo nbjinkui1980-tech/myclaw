@@ -1051,13 +1051,25 @@ pub(super) async fn build_backend_production(
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
+    // One re-activation port for every administrator save: the host's
+    // lifecycle re-activation, then a configuration-change signal so a
+    // deployment-bound stream connection restarts with the new values.
+    let stream_configuration_changes =
+        Arc::new(ironclaw_extension_host::stream_supervisor::StreamConfigurationChanges::default());
+    let channel_config_reactivation: Arc<dyn ironclaw_extension_host::ChannelConfigReactivation> =
+        Arc::new(
+            ironclaw_extension_host::stream_supervisor::StreamRestartingReactivation::new(
+                Arc::clone(&extension_management)
+                    as Arc<dyn ironclaw_extension_host::ChannelConfigReactivation>,
+                Arc::clone(&stream_configuration_changes),
+            ),
+        );
     let admin_configuration_resolver = Arc::new(
         ChannelConfigService::new(
             extension_management.installation_store_handle(),
             Arc::clone(&secret_store),
             channel_egress_scope.clone(),
-            Arc::clone(&extension_management)
-                as Arc<dyn ironclaw_extension_host::ChannelConfigReactivation>,
+            Arc::clone(&channel_config_reactivation),
         )
         .with_admin_configuration(
             Arc::clone(&admin_configuration),
@@ -1167,8 +1179,7 @@ pub(super) async fn build_backend_production(
         &mut first_party_registry,
         Arc::clone(&admin_configuration),
         channel_egress_scope.user_id.clone(),
-        Arc::clone(&extension_management)
-            as Arc<dyn ironclaw_extension_host::ChannelConfigReactivation>,
+        Arc::clone(&channel_config_reactivation),
         admin_configuration_consumers,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -1505,6 +1516,7 @@ pub(super) async fn build_backend_production(
         stream_connector,
         stream_scope: channel_egress_scope.clone(),
         stream_statuses,
+        stream_configuration_changes,
         delivery_coordinator: channel_host_wiring.delivery_coordinator,
         channel_delivery_resolver: channel_host_wiring.channel_delivery_resolver,
         #[cfg(feature = "test-support")]

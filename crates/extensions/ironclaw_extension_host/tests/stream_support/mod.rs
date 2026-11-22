@@ -32,13 +32,15 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_extension_host::stream_supervisor::{
     BackoffPolicy, FanoutStreamAudit, StreamAuditEvent, StreamAuditKind, StreamAuditSink,
-    StreamConnectionStatuses, StreamSupervisor, StreamSupervisorConfig, StreamSupervisorDeps,
+    StreamConfigurationChanges, StreamConnectionStatuses, StreamSupervisor, StreamSupervisorConfig,
+    StreamSupervisorDeps,
 };
 use ironclaw_extension_host::test_support::{FakeChannelAdapter, resolve_manifest_toml};
 use ironclaw_extension_host::{
-    DeploymentChannelRegistry, ExtensionBindings, ExtensionEntrypoint, ExtensionHost,
-    ExtensionHostDeps, ExtensionLoader, FilesystemInboundBatchStore, InstallationRecord,
-    InstallationRecordStore, LoadContext, LoadedExtension, RehydratedInstallationRecordStore,
+    DeploymentChannelBinding, DeploymentChannelRegistry, ExtensionBindings, ExtensionEntrypoint,
+    ExtensionHost, ExtensionHostDeps, ExtensionLoader, FilesystemInboundBatchStore,
+    InstallationRecord, InstallationRecordStore, LoadContext, LoadedExtension,
+    RehydratedInstallationRecordStore,
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::action::NetworkPolicy;
@@ -603,15 +605,9 @@ impl ExtensionLoader for FixedLoader {
                 &self,
                 _ctx: ironclaw_extension_host::BindContext,
             ) -> Result<ExtensionBindings, ironclaw_extension_host::BindError> {
-                let adapter = Arc::new(ScriptedStreamAdapter {
-                    decoded: Arc::clone(&self.0),
-                });
                 Ok(ExtensionBindings {
                     tools: None,
-                    channel: ChannelSurfaces::default()
-                        .with_ingress(adapter.clone())
-                        .with_stream_control(adapter)
-                        .with_reply(Arc::new(FakeChannelAdapter::default())),
+                    channel: scripted_surfaces(&self.0),
                     device_link: None,
                 })
             }
@@ -622,6 +618,17 @@ impl ExtensionLoader for FixedLoader {
     }
 }
 
+/// The scripted stream channel's bound halves, shared by the active loader
+/// and the deployment binding.
+fn scripted_surfaces(decoded: &Arc<AtomicUsize>) -> ChannelSurfaces {
+    let adapter = Arc::new(ScriptedStreamAdapter {
+        decoded: Arc::clone(decoded),
+    });
+    ChannelSurfaces::default()
+        .with_ingress(adapter.clone())
+        .with_stream_control(adapter)
+        .with_reply(Arc::new(FakeChannelAdapter::default()))
+}
 pub struct Harness {
     pub host: Arc<ExtensionHost>,
     pub gateway: Gateway,
@@ -636,6 +643,8 @@ pub struct Harness {
     pub decoded: Arc<AtomicUsize>,
     pub router: Arc<ExtensionIngressRouter>,
     pub supervisor: Option<Arc<StreamSupervisor>>,
+    /// The administrator-configuration signal the supervisor listens to.
+    pub changes: Arc<StreamConfigurationChanges>,
     connector: Arc<PolicyWebSocketConnector<LoopbackWebSocketTransport, PublicResolver>>,
     deployment_channels: Arc<DeploymentChannelRegistry>,
     config: StreamSupervisorConfig,
@@ -648,6 +657,9 @@ pub struct HarnessOptions {
     /// Start the supervisor immediately (default). A test of boot restoration
     /// activates first and calls [`Harness::spawn_supervisor`] afterwards.
     pub start_supervisor: bool,
+    /// Also bind the channel as a deployment channel (as a binary with a
+    /// linked adapter does), so the connection source is the deployment one.
+    pub deployment: bool,
 }
 
 impl Default for HarnessOptions {
@@ -655,6 +667,7 @@ impl Default for HarnessOptions {
         Self {
             manifest: manifest_with(&[]),
             start_supervisor: true,
+            deployment: false,
             config: StreamSupervisorConfig {
                 backoff: BackoffPolicy {
                     initial: Duration::from_millis(20),
@@ -735,6 +748,18 @@ impl Harness {
             PublicResolver,
         ));
         let manifest = Arc::new(resolve_manifest_toml(&options.manifest));
+        let deployment_channels = if options.deployment {
+            Arc::new(
+                DeploymentChannelRegistry::try_new([DeploymentChannelBinding::new(
+                    Arc::clone(&manifest),
+                    scripted_surfaces(&decoded),
+                )
+                .expect("deployment binding validates")])
+                .expect("deployment registry validates"),
+            )
+        } else {
+            Arc::new(DeploymentChannelRegistry::default())
+        };
         let mut harness = Self {
             host,
             gateway,
@@ -747,7 +772,8 @@ impl Harness {
             router,
             supervisor: None,
             connector,
-            deployment_channels: Arc::new(DeploymentChannelRegistry::default()),
+            deployment_channels,
+            changes: Arc::default(),
             config: options.config,
             manifest,
         };
@@ -765,6 +791,7 @@ impl Harness {
                 admission: self.router.stream_admission(),
                 connector: Arc::clone(&self.connector) as Arc<dyn WebSocketConnector>,
                 scope: scope(),
+                configuration_changes: Arc::clone(&self.changes),
                 audit: Arc::new(FanoutStreamAudit::new(vec![
                     Arc::clone(&self.audit) as Arc<dyn StreamAuditSink>,
                     Arc::clone(&self.statuses) as Arc<dyn StreamAuditSink>,

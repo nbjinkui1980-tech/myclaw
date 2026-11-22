@@ -436,6 +436,8 @@ pub(crate) struct RebornRuntimeStores {
     /// projection reads.
     pub(crate) stream_statuses:
         Arc<ironclaw_extension_host::stream_supervisor::StreamConnectionStatuses>,
+    pub(crate) stream_configuration_changes:
+        Arc<ironclaw_extension_host::stream_supervisor::StreamConfigurationChanges>,
     /// The generic delivery coordinator (extension-runtime §5.4): the sole
     /// writer of outbound delivery state, resolving channel adapters +
     /// policy egress from deployment bindings or the active compatibility

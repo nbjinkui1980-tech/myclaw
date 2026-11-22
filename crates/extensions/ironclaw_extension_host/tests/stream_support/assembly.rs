@@ -388,6 +388,7 @@ impl AssemblyHarness {
                 admission: ingress.router.stream_admission(),
                 connector,
                 scope: scope(),
+                configuration_changes: Arc::default(),
                 audit: Arc::clone(&audit) as Arc<dyn StreamAuditSink>,
             },
             config,

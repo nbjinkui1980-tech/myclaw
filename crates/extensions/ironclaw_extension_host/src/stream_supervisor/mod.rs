@@ -12,6 +12,7 @@
 //!
 //! [`ChannelStreamControl`]: ironclaw_extension_contracts::channel_adapter::ChannelStreamControl
 mod audit;
+mod changes;
 mod connect;
 mod connection;
 mod rate;
@@ -31,6 +32,7 @@ use tokio::sync::watch;
 pub use audit::{
     FanoutStreamAudit, StreamAuditEvent, StreamAuditKind, StreamAuditSink, TracingStreamAudit,
 };
+pub use changes::{StreamConfigurationChanges, StreamRestartingReactivation};
 pub use rate::BackoffPolicy;
 pub use status::{StreamConnectionState, StreamConnectionStatus, StreamConnectionStatuses};
 
@@ -58,7 +60,8 @@ pub struct StreamSupervisorConfig {
     pub backoff: BackoffPolicy,
     /// Consecutive credential refusals (or declaration/endpoint rejections)
     /// after which retrying stops and an administrator has to act. A changed
-    /// credential re-activates the extension, which starts a fresh connection.
+    /// credential starts a fresh connection (a re-activation for an active
+    /// source, a configuration-change signal for a deployment source).
     pub auth_failure_threshold: u32,
     /// Live connections the supervisor keeps at once. An installation over the
     /// limit is reported as `NeedsAdministrator` and retried as soon as a
@@ -110,6 +113,10 @@ pub struct StreamSupervisorDeps {
     pub connector: Arc<dyn WebSocketConnector>,
     pub scope: ResourceScope,
     pub audit: Arc<dyn StreamAuditSink>,
+    /// Administrator configuration changes; a change restarts the extension's
+    /// deployment-sourced connection (an active-sourced one restarts with the
+    /// re-published snapshot).
+    pub configuration_changes: Arc<StreamConfigurationChanges>,
 }
 
 /// Cooperative stop signal shared with a connection task.
@@ -129,6 +136,8 @@ impl Cancel {
 
 struct RunningConnection {
     source: StreamSource,
+    /// The extension's configuration generation when the task started.
+    generation: u64,
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
     /// Set by the task just before it signals `task_ended`, so the pass that
@@ -171,6 +180,7 @@ impl StreamSupervisor {
     /// `Arc` ends it.
     pub fn start(deps: StreamSupervisorDeps, config: StreamSupervisorConfig) -> Arc<Self> {
         let mut subscription = deps.watch.subscribe();
+        let mut changes = deps.configuration_changes.subscribe();
         let supervisor = Arc::new(Self {
             deps,
             admissions: Arc::new(tokio::sync::Semaphore::new(
@@ -196,6 +206,11 @@ impl StreamSupervisor {
                 }
                 tokio::select! {
                     changed = subscription.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
+                    changed = changes.changed() => {
                         if changed.is_err() {
                             break;
                         }
@@ -245,9 +260,12 @@ impl StreamSupervisor {
             let stale: Vec<String> = running
                 .iter()
                 .filter(|(id, current)| {
-                    desired
-                        .get(*id)
-                        .is_none_or(|wanted| !wanted.same_source(&current.source))
+                    desired.get(*id).is_none_or(|wanted| {
+                        !wanted.same_source(&current.source)
+                            || (wanted.is_deployment()
+                                && current.generation
+                                    != self.deps.configuration_changes.generation(id))
+                    })
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
@@ -301,6 +319,7 @@ impl StreamSupervisor {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&id);
+            let generation = self.deps.configuration_changes.generation(&id);
             let (stop, stopped) = watch::channel(false);
             let ctx = Arc::new(ConnectionContext {
                 source: source.clone(),
@@ -322,6 +341,7 @@ impl StreamSupervisor {
                 id,
                 RunningConnection {
                     source,
+                    generation,
                     stop,
                     task,
                     ended,
@@ -456,7 +476,7 @@ async fn supervised_task(
 /// One installation's connection until it is stopped: connect, serve, and on
 /// any end reconnect after a backoff delay. Repeated credential refusals stop
 /// the retrying (the extension then needs an administrator); a re-activation
-/// with changed credentials replaces this task.
+/// or configuration change with new credentials replaces this task.
 async fn connection_task(ctx: Arc<ConnectionContext>, mut cancel: Cancel) {
     let mut backoff = Backoff::new(ctx.config.backoff);
     let mut refusals = 0u32;
