@@ -952,7 +952,7 @@ tests/support/reborn_parity_qa/network.rs
 不是以下原因(已逐项排除):
 - 评审 #1 删除 `credential_handle`:`body_credentials` 与目标凭证分别解析,恢复它只会重新引入 `Authorization: Bearer` 头,未恢复。
 - 凭证端口作用域:生产的 `ChannelConfigEgressCredentials` 读管理员配置的租户共享作用域,与保存路径一致;集成测试通过 `builtin.admin_configuration_replace` 保存后能读到值。
-- 启动时的 `config_unavailable`:监督器先于渠道入站注册读取配置,属瞬时失败,按第 5.5 节退避重试,不是缺陷。`Connected` 事件按 debug 级别记录,是可观测性缺口,未改动(开放项)。
+- 启动时的 `config_unavailable`:监督器先于渠道入站注册读取配置,属瞬时失败,按第 5.5 节退避重试,不是缺陷。`Connected` 事件原按 debug 级别记录,是可观测性缺口;经批准人决定,已改为 info 级别(`TracingStreamAudit`),`Stopped` 仍为 debug。
 
 为什么测试没发现:原有流式与钉钉集成测试在安装前通过测试注入点提供秘密,绕过了管理员配置保存路径,也从未进入 `NeedsAdministrator` 后再保存;crate 层测试用的是空的部署渠道表,只覆盖 Active 来源。
 
