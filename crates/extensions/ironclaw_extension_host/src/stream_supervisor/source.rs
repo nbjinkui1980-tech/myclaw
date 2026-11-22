@@ -12,7 +12,8 @@ use crate::deployment_channels::DeploymentChannelBinding;
 
 /// Where a stream channel's bindings came from. Identity is by `Arc`, so a
 /// republished (re-activated) extension is a different source and its
-/// connection restarts, which is how rotated credentials take effect.
+/// connection restarts. A deployment binding never changes identity, so its
+/// connection restarts on the configuration-change signal instead.
 #[derive(Clone)]
 pub(super) enum StreamSource {
     Deployment(Arc<DeploymentChannelBinding>),
@@ -57,6 +58,10 @@ impl StreamSource {
             Self::Deployment(_) => "deployment",
             Self::Active(_) => "active",
         }
+    }
+
+    pub fn is_deployment(&self) -> bool {
+        matches!(self, Self::Deployment(_))
     }
 
     pub fn same_source(&self, other: &Self) -> bool {

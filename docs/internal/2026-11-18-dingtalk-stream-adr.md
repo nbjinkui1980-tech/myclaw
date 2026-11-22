@@ -941,3 +941,21 @@ tests/support/reborn_parity_qa/network.rs
 | #3 | 不作为阻塞项 | 仓库 CI 的各测试任务统一设置 `RUST_MIN_STACK=67108864`,里程碑一的集成测试同样依赖它;测试文件头注释写明这一依赖。 |
 | #14 | 本任务不处理 | 架构测试按目录名查找边界规则是通用缺陷(`docs/internal/gate-audit-2026-08.md` 已记录,slack、telegram 同样受影响);记入计划"后续项"。 |
 
+
+### 修订记录(2026-11-23,真实验收发现:管理员保存凭证后流式连接不恢复)
+原"批准"与"修订批准"两节以及已批准的决定未改动;本节只追加。
+
+现象(真实环境验收):管理员已保存 ClientID 与 ClientSecret,扩展页仍显示"需要配置",状态为 `NeedsAdministrator`、原因 `connect_credentials_missing`;进程重启后才恢复。
+
+根因:有部署绑定的流式渠道(钉钉有)的连接来源是 `StreamSource::Deployment`,其标识是进程内永不改变的 `Arc`。第 5.7 节要求的"管理员凭证变化时重启连接"只对 `Active` 来源成立:保存配置只重新发布 Active 快照,监督器看到同一个部署来源,就跳过了已结束的任务。连接在凭证尚不可读的启动时段进入 `NeedsAdministrator` 后,保存凭证不会让它重试。
+
+不是以下原因(已逐项排除):
+- 评审 #1 删除 `credential_handle`:`body_credentials` 与目标凭证分别解析,恢复它只会重新引入 `Authorization: Bearer` 头,未恢复。
+- 凭证端口作用域:生产的 `ChannelConfigEgressCredentials` 读管理员配置的租户共享作用域,与保存路径一致;集成测试通过 `builtin.admin_configuration_replace` 保存后能读到值。
+- 启动时的 `config_unavailable`:监督器先于渠道入站注册读取配置,属瞬时失败,按第 5.5 节退避重试,不是缺陷。`Connected` 事件原按 debug 级别记录,是可观测性缺口;经批准人决定,已改为 info 级别(`TracingStreamAudit`),`Stopped` 仍为 debug。
+
+为什么测试没发现:原有流式与钉钉集成测试在安装前通过测试注入点提供秘密,绕过了管理员配置保存路径,也从未进入 `NeedsAdministrator` 后再保存;crate 层测试用的是空的部署渠道表,只覆盖 Active 来源。
+
+修复(通用层,无厂商名,不改契约和 manifest):`ironclaw_extension_host::stream_supervisor` 新增 `StreamConfigurationChanges`(按扩展 id 的变更代次)和 `StreamRestartingReactivation`(装饰唯一的 `ChannelConfigReactivation` 端口,重新激活后无条件递增代次)。监督器在部署来源的代次变化时重启连接,Active 来源不重复重启。composition 把装饰后的端口同时交给 `ChannelConfigService` 和管理员配置 handler。代次只含扩展 id 与计数,不含秘密。回滚:revert 对应提交,无持久化变更。
+
+同类路径排查:token 交换与建连共用同一凭证端口,webhook 渠道的 registration/activation_calls 由生命周期激活驱动且不依赖监督器来源,均不受影响。开放项:部署绑定但未安装的 webhook 渠道,保存配置时 `reactivate_if_active` 不做任何事(生命周期范畴,未改)。

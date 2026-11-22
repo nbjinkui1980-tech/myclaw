@@ -745,6 +745,7 @@ pub(crate) async fn build_runtime_channel_host(
                     admission: ingress.router.stream_admission(),
                     connector: Arc::clone(&services.stream_connector),
                     scope: services.stream_scope.clone(),
+                    configuration_changes: Arc::clone(&services.stream_configuration_changes),
                     audit: Arc::new(
                         ironclaw_extension_host::stream_supervisor::FanoutStreamAudit::new(vec![
                             Arc::new(

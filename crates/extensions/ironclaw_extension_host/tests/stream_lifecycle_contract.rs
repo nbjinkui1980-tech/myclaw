@@ -141,6 +141,112 @@ async fn a_new_activation_after_the_administrator_flag_connects_again() {
     connected(&harness, 1).await;
 }
 
+/// A deployment-bound channel keeps one source for the process, so a
+/// republished snapshot never restarts it: only the administrator
+/// configuration signal does.
+#[tokio::test]
+async fn a_configuration_change_restarts_a_deployment_stream_that_needs_an_administrator() {
+    let harness = Harness::start(HarnessOptions {
+        deployment: true,
+        ..HarnessOptions::default()
+    })
+    .await;
+    harness.egress.set_default(ConnectScript::Status(401));
+    harness.activate().await;
+    wait_until(
+        || {
+            harness.audit.count(&StreamAuditKind::NeedsAdministrator {
+                reason: "connect_unauthorized",
+            }) == 1
+        },
+        "the administrator flag",
+    )
+    .await;
+    // The working credential alone restarts nothing: a later reconcile pass
+    // (the fence) leaves the stopped connection stopped.
+    harness.egress.set_default(ConnectScript::Grant);
+    let refusals = harness.egress.call_count();
+    reconcile_fence(&harness, "acme-fence-one").await;
+    assert_eq!(
+        harness
+            .audit
+            .count_for(EXTENSION_ID, &StreamAuditKind::Connected),
+        0,
+        "without the signal the stopped connection stays stopped"
+    );
+    assert_eq!(
+        harness.egress.call_count(),
+        refusals + 1,
+        "only the fence dialed"
+    );
+
+    // The administrator saves the credential: the save signals the change.
+    harness.changes.notify(EXTENSION_ID);
+    wait_until(
+        || {
+            harness
+                .audit
+                .count_for(EXTENSION_ID, &StreamAuditKind::Connected)
+                == 1
+        },
+        "the restarted connection",
+    )
+    .await;
+    harness
+        .gateway
+        .send_to_latest(event_frame("F-1", "Ev-1", "C-1"));
+    wait_until(|| harness.gateway.ack_count() == 1, "the ACK").await;
+}
+
+/// Activates another stream extension and waits for its connection. The
+/// supervisor serializes reconcile passes, and the pass that dials the new
+/// extension checks every running connection against the current
+/// configuration generation first, so a change signalled before the fence
+/// has been acted on once the fence connects.
+async fn reconcile_fence(harness: &Harness, fence_id: &str) {
+    harness.activate_other(fence_id).await;
+    wait_until(
+        || {
+            harness
+                .audit
+                .count_for(fence_id, &StreamAuditKind::Connected)
+                == 1
+        },
+        "the fence connection",
+    )
+    .await;
+}
+
+/// An active-sourced stream already restarts with the re-published snapshot;
+/// the signal must not restart it a second time.
+#[tokio::test]
+async fn a_configuration_change_does_not_restart_an_active_stream_twice() {
+    let harness = Harness::start(HarnessOptions::default()).await;
+    harness.activate().await;
+    connected(&harness, 1).await;
+    harness.changes.notify(EXTENSION_ID);
+    reconcile_fence(&harness, "acme-fence-one").await;
+
+    assert_eq!(
+        harness
+            .audit
+            .count_for(EXTENSION_ID, &StreamAuditKind::Connected),
+        1,
+        "the signal did not reconnect the active-sourced stream"
+    );
+    assert_eq!(
+        harness.audit.count(&StreamAuditKind::Stopped),
+        0,
+        "nothing was stopped"
+    );
+    assert_eq!(
+        harness.gateway.closed.load(Ordering::SeqCst),
+        0,
+        "no socket closed"
+    );
+    assert_eq!(harness.egress.call_count(), 2, "one grant per extension");
+}
+
 #[tokio::test]
 async fn the_connection_limit_holds_and_a_freed_slot_is_used() {
     let harness = Harness::start(HarnessOptions {

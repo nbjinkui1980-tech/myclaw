@@ -37,7 +37,10 @@ Grouped by responsibility (all modules are `pub`; see `src/lib.rs`):
   session stay ordered; queues are bounded and a full one stops the reader;
   reconnect uses exponential jittered backoff. The connection follows the
   extension's activation (start, replace on re-activation, stop on
-  deactivation, bounded count, graceful `shutdown`).
+  deactivation, bounded count, graceful `shutdown`). A deployment-bound
+  stream connection never changes source identity, so it restarts on the
+  administrator configuration-change signal (`StreamConfigurationChanges`,
+  raised by `StreamRestartingReactivation` around the re-activation port).
 - **Channel services (generic, per-extension)** — `GenericChannelHostAssembly`
   (`channel_host.rs`, the ingress reconciler), delivery ports
   (`run_delivery_ports.rs`, `channel_delivery.rs`), egress transports
