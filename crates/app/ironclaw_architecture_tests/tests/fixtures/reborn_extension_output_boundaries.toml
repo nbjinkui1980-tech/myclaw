@@ -387,3 +387,13 @@ owner = "builtin.http request producer"
 evidence_path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
 evidence_test = "non_empty_body_base64_is_decoded"
 rationale = "builtin.http decodes caller-supplied request bytes before mediated egress; response output remains separately classified."
+
+[[boundary]]
+path = "crates/extensions/packages/dingtalk/src/stream.rs"
+indicator = "headers_field"
+classification = "protocol_projection"
+exposure = "outbound stream acknowledgement frame sent to the vendor gateway"
+owner = "DingTalk stream frame control"
+evidence_path = "crates/extensions/packages/dingtalk/src/tests/inbound.rs"
+evidence_test = "callback_frame_delivers_its_data_and_acks_with_the_frame_message_id"
+rationale = "The headers key is part of the vendor's acknowledgement frame shape (messageId, contentType). It is written to the gateway socket by the host and never becomes a model-visible tool result."

@@ -1974,6 +1974,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_config",
             "ironclaw_trace_commons",
             "ironclaw_webui",
+            "ironclaw_dingtalk_extension",
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
             // The web-app channel package (adapter/codec/target provider) and
@@ -4285,6 +4286,52 @@ struct BoundaryRule {
     forbidden: Vec<&'static str>,
 }
 
+/// The DingTalk BoundaryRule must actually be evaluated.
+///
+/// `reborn_boundary_rules_active_crates_are_workspace_members` resolves rules
+/// by crate DIRECTORY basename, so a package living at `packages/dingtalk/`
+/// under the package name `ironclaw_dingtalk_extension` is skipped there (the
+/// slack/telegram fail-open of docs/internal/gate-audit-2026-08.md). The
+/// dependency check itself keys by package name through `cargo metadata`, so
+/// this test proves that path sees the crate: the package is a workspace
+/// member, its rule exists, and the enforced edge set is exactly the
+/// sanctioned contracts tier.
+#[test]
+fn dingtalk_boundary_rule_is_armed() {
+    const NAME: &str = "ironclaw_dingtalk_extension";
+    let rule = boundary_rules()
+        .into_iter()
+        .find(|rule| rule.crate_name == NAME)
+        .expect("a BoundaryRule names the dingtalk package");
+    assert!(
+        rule.forbidden.len() > 20,
+        "the rule must carry the full forbidden set, not a stub"
+    );
+    let metadata = cargo_metadata();
+    let dependencies = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages")
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+    let actual = dependencies
+        .get(NAME)
+        .unwrap_or_else(|| panic!("{NAME} must be in cargo metadata"));
+    for forbidden in &rule.forbidden {
+        assert!(
+            !actual.iter().any(|dependency| dependency == forbidden),
+            "{NAME} must not depend on {forbidden}; actual: {actual:?}"
+        );
+    }
+    let actual: std::collections::BTreeSet<&str> = actual.iter().map(String::as_str).collect();
+    assert_eq!(
+        actual,
+        ["ironclaw_extension_contracts", "ironclaw_host_api"]
+            .into_iter()
+            .collect(),
+        "the package's ironclaw dependency set is the contracts boundary only"
+    );
+}
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
@@ -4624,6 +4671,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
+                "ironclaw_dingtalk_extension",
                 "ironclaw_slack_extension",
                 "ironclaw_storage",
                 "ironclaw_telegram_extension",
@@ -4662,6 +4710,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_assistant",
                 "ironclaw_composition",
                 "ironclaw_sandbox",
+                "ironclaw_dingtalk_extension",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -4700,6 +4749,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_openai_compat",
                 "ironclaw_turn_runner",
                 "ironclaw_sandbox",
+                "ironclaw_dingtalk_extension",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -4763,6 +4813,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_turn_runner",
                 "ironclaw_sandbox",
                 "ironclaw_secrets",
+                "ironclaw_dingtalk_extension",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -5113,6 +5164,58 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            // DingTalk channel package (Stream mode): a pure protocol
+            // translator over the contracts tier, dependency-set sibling of
+            // Slack and Telegram. Its package name differs from its directory
+            // (`packages/dingtalk`), so the directory-keyed membership check
+            // above skips it exactly as it skips slack and telegram (gate
+            // audit 2026-08 §2.1); `dingtalk_boundary_rule_is_armed` below
+            // closes that hole for this crate by name.
+            crate_name: "ironclaw_dingtalk_extension",
+            forbidden: vec![
+                "ironclaw_legacy",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_auth",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_event_log",
+                "ironclaw_extension_host",
+                "ironclaw_extension_registry",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_host",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_assistant",
+                "ironclaw_turn_runner",
+                "ironclaw",
+                "ironclaw_composition",
+                "ironclaw_config",
+                "ironclaw_event_store",
+                "ironclaw_resources",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_sandbox",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_slack_extension",
+                "ironclaw_telegram_extension",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
                 "ironclaw_wasm",
             ],
         },

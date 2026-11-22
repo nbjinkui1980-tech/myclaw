@@ -2376,6 +2376,199 @@ pub(crate) fn extension_runtime_acme_token_tools_profile(
         .with_stream_connector_for_test(connector);
     Ok((profile, egress, fixture))
 }
+// ── DingTalk package profile (DingTalk plan, Tasks 13–14) ──────────────────
+/// The shipped `crates/extensions/packages/dingtalk` manifest's `runtime.service`.
+pub(crate) const DINGTALK_FIXTURE_SERVICE: &str = "dingtalk.extension/v1";
+/// Fake application credentials the fake DingTalk endpoints accept. Invented
+/// test values, never real credentials.
+pub(crate) const DINGTALK_CLIENT_ID: &str = "itest-dingtalk-client-id";
+pub(crate) const DINGTALK_CLIENT_SECRET: &str = "itest-dingtalk-client-secret";
+/// Ticket the fake connect endpoint hands out.
+pub(crate) const DINGTALK_TICKET: &str = "ITEST-DINGTALK-TICKET";
+/// Prefix of every access token the fake token endpoint issues.
+pub(crate) const DINGTALK_TOKEN_PREFIX: &str = "ITEST-DINGTALK-ACCESS-TOKEN-";
+const DINGTALK_CONNECT_PATH: &str = "/v1.0/gateway/connections/open";
+const DINGTALK_TOKEN_PATH: &str = "/v1.0/oauth2/accessToken";
+const DINGTALK_DM_SEND_PATH: &str = "/v1.0/robot/oToMessages/batchSend";
+const DINGTALK_GROUP_SEND_PATH: &str = "/v1.0/robot/groupMessages/send";
+fn dingtalk_package_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/extensions/packages/dingtalk")
+}
+/// Fake DingTalk OpenAPI: the stream connect call, the access-token exchange,
+/// and the two robot send endpoints. Each checks what the host must have
+/// injected (the app credentials in the bodies, the exchanged token in the
+/// `x-acs-dingtalk-access-token` header) and answers in the official SDK's
+/// response shapes. Anything else falls through to the lifecycle router.
+#[derive(Default)]
+pub(crate) struct DingTalkVendor {
+    exchanges: std::sync::atomic::AtomicUsize,
+    sends: std::sync::atomic::AtomicUsize,
+    /// When set, every robot send answers with this status and an empty body
+    /// (a scripted vendor fault), without counting as an accepted send.
+    send_failure_status: std::sync::atomic::AtomicU16,
+}
+impl DingTalkVendor {
+    /// Make every following robot send answer `status` (0 restores success).
+    pub(crate) fn script_send_failure(&self, status: u16) {
+        self.send_failure_status
+            .store(status, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn exchanges(&self) -> usize {
+        self.exchanges.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn route(&self, request: &ironclaw_network::NetworkHttpRequest) -> Option<(u16, Vec<u8>)> {
+        use std::sync::atomic::Ordering;
+        let body = || serde_json::from_slice::<serde_json::Value>(&request.body).ok();
+        let field = |value: &serde_json::Value, name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        if request.url.ends_with(DINGTALK_CONNECT_PATH) {
+            let body = body()?;
+            if field(&body, "clientId").as_deref() != Some(DINGTALK_CLIENT_ID)
+                || field(&body, "clientSecret").as_deref() != Some(DINGTALK_CLIENT_SECRET)
+            {
+                return Some((401, br#"{"code":"invalidClient"}"#.to_vec()));
+            }
+            return Some((
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "endpoint": "wss://wss-open-connection.dingtalk.com/connect",
+                    "ticket": DINGTALK_TICKET,
+                }))
+                .ok()?,
+            ));
+        }
+        if request.url.ends_with(DINGTALK_TOKEN_PATH) {
+            let body = body()?;
+            if field(&body, "appKey").as_deref() != Some(DINGTALK_CLIENT_ID)
+                || field(&body, "appSecret").as_deref() != Some(DINGTALK_CLIENT_SECRET)
+            {
+                return Some((401, br#"{"code":"invalidClient"}"#.to_vec()));
+            }
+            let n = self.exchanges.fetch_add(1, Ordering::SeqCst) + 1;
+            return Some((
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "accessToken": format!("{DINGTALK_TOKEN_PREFIX}{n}"),
+                    "expireIn": 7200,
+                }))
+                .ok()?,
+            ));
+        }
+        if request.url.ends_with(DINGTALK_DM_SEND_PATH)
+            || request.url.ends_with(DINGTALK_GROUP_SEND_PATH)
+        {
+            let authorized = request.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("x-acs-dingtalk-access-token")
+                    && value.starts_with(DINGTALK_TOKEN_PREFIX)
+            });
+            if !authorized {
+                return Some((401, br#"{"code":"InvalidAuthentication"}"#.to_vec()));
+            }
+            let failure = self.send_failure_status.load(Ordering::SeqCst);
+            if failure != 0 {
+                return Some((failure, Vec::new()));
+            }
+            let n = self.sends.fetch_add(1, Ordering::SeqCst) + 1;
+            return Some((
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "processQueryKey": format!("itest-pqk-{n}"),
+                }))
+                .ok()?,
+            ));
+        }
+        hosted_mcp_discovery_fixture_response(request)
+    }
+}
+struct DingTalkFixtureFactory;
+#[async_trait::async_trait]
+impl ironclaw_extension_host::NativeExtensionFactory for DingTalkFixtureFactory {
+    fn service(&self) -> &str {
+        DINGTALK_FIXTURE_SERVICE
+    }
+    async fn load(
+        &self,
+        _ctx: &ironclaw_extension_host::LoadContext,
+    ) -> Result<
+        Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
+        ironclaw_extension_host::BindError,
+    > {
+        Ok(Box::new(DingTalkFixtureEntrypoint))
+    }
+}
+struct DingTalkFixtureEntrypoint;
+impl ironclaw_extension_host::ExtensionEntrypoint for DingTalkFixtureEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
+    {
+        // The REAL package halves, from the same constructor the binary calls.
+        Ok(ironclaw_extension_host::ExtensionBindings {
+            tools: None,
+            channel: ironclaw_dingtalk_extension::dingtalk_channel().surfaces,
+            device_link: None,
+        })
+    }
+}
+/// The binary's DingTalk binding (`native_extensions.rs`): the real adapter
+/// halves plus the preference-target codec explicit pushes decode through,
+/// from the package's one constructor.
+fn dingtalk_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
+    let dingtalk = ironclaw_dingtalk_extension::dingtalk_channel();
+    ironclaw_composition::ChannelExtensionBinding {
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("dingtalk".to_string()),
+        surfaces: dingtalk.surfaces,
+        preference_target_codec: Some(dingtalk.preference_target_codec),
+        outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
+    }
+}
+/// The extension-lifecycle profile extended with the shipped DingTalk package:
+/// its manifest copied from the package directory, a native factory binding
+/// the real adapter halves, a fake DingTalk OpenAPI behind the recording
+/// network egress, and the stream connector replaced by `connector`.
+pub(crate) fn extension_runtime_dingtalk_tools_profile(
+    connector: Arc<dyn ironclaw_network::WebSocketConnector>,
+) -> HarnessResult<(
+    ToolsProfile,
+    Arc<RecordingNetworkHttpEgress>,
+    Arc<DingTalkVendor>,
+)> {
+    let vendor = Arc::new(DingTalkVendor::default());
+    let router_vendor = Arc::clone(&vendor);
+    let egress = Arc::new(
+        RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
+            .with_vendor_router(Arc::new(move |request| router_vendor.route(request))),
+    );
+    let mut profile = extension_lifecycle_tools_profile()?;
+    // Explicit model-initiated push (`builtin.outbound_deliver`, Task 18).
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::ids::CapabilityId::new(
+            ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID,
+        )?);
+    if let Some(trust) = profile.provider_trust_override.as_mut() {
+        trust.push((
+            ironclaw_host_api::ids::ExtensionId::new("dingtalk")?,
+            standalone_all_effects(),
+        ));
+    }
+    profile.options = profile
+        .options
+        .with_recording_network_egress(Arc::clone(&egress))
+        .with_fixture_extension_dir(dingtalk_package_dir(), "dingtalk")
+        .with_native_extension_factory(Arc::new(DingTalkFixtureFactory))
+        .with_channel_extension_binding(dingtalk_channel_extension_binding())
+        .with_stream_connector_for_test(connector);
+    Ok((profile, egress, vendor))
+}
 // ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────
 
 /// The bundled telegram manifest's `runtime.service` id — the same native

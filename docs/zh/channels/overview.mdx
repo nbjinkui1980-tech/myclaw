@@ -3,11 +3,14 @@ title: "Overview"
 description: "设置消息渠道以与您的智能体交互"
 ---
 
-频道让您可以在 Web 界面之外与智能体对话。IronClaw 支持 Slack 和 Telegram。
+频道让您可以在 Web 界面之外与智能体对话。IronClaw 支持 Slack、Telegram 和钉钉。
 
 <CardGroup cols={2}>
   <Card title="Telegram" icon="send" href="/zh/channels/telegram">
     在 Telegram 私聊和群聊中与您的智能体对话。
+  </Card>
+  <Card title="钉钉" icon="message" href="/zh/channels/dingtalk">
+    通过您所在组织的钉钉机器人与智能体对话。
   </Card>
 </CardGroup>
 
@@ -54,7 +57,7 @@ Telegram 有**两个**容易混淆的步骤：由运维人员为整个实例保�
 
 ## 接收消息
 
-两个频道都通过 Webhook 投递事件，因此消息平台需要能通过 HTTPS 访问到您的 IronClaw 实例。
+Slack 和 Telegram 通过 Webhook 投递事件，因此消息平台需要能通过 HTTPS 访问到您的 IronClaw 实例。钉钉不同：IronClaw 使用 Stream 模式主动向外连接，不需要公网地址，且每组应用凭证只支持运行一个实例。
 
 ---
 

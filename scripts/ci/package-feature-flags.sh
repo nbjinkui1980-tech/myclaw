@@ -73,7 +73,8 @@ case "${package}" in
   ironclaw_config | \
   ironclaw_identity | \
   ironclaw_trace_commons | \
-  ironclaw_telegram_extension)
+  ironclaw_telegram_extension | \
+  ironclaw_dingtalk_extension)
     # Already on the allowlist with no feature flags; keep them flag-free now
     # that the default branch derives fallback features for closure crates.
     ;;

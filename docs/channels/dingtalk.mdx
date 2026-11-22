@@ -1,0 +1,201 @@
+---
+title: "DingTalk"
+description: "Interact with your agent through your organization's DingTalk robot"
+icon: message
+---
+
+Connect IronClaw to an enterprise-internal DingTalk application robot so people in your
+DingTalk organization can chat with your agent in single chats and, by @mentioning the
+robot, in groups.
+
+IronClaw connects **outward** to DingTalk using Stream mode. You do not need a public
+address, a tunnel, or a webhook URL.
+
+<Warning>
+**Not yet verified against a live DingTalk organization.** The gateway host name, the
+permission names, and several message-field details below have been built from DingTalk's
+published SDK sources and have not been confirmed with a real connection. Where this page
+says "check the DingTalk console", the console you see is authoritative. See
+[Troubleshooting](#troubleshooting) for the statuses that tell you what to fix.
+</Warning>
+
+## Scope
+
+- **One IronClaw deployment connects to one DingTalk organization.** Each operator hosts
+  IronClaw themselves and uses an application created in their own organization.
+  Connecting several organizations to one deployment, and publishing to the DingTalk app
+  market, are not supported.
+- **Run one IronClaw instance per application credential.** Do not start a second
+  instance, or a test and a production environment, with the same ClientID and
+  ClientSecret. It is not known how DingTalk spreads messages across several connections
+  for one application, so a second instance may take messages meant for the first.
+- Only members of your own organization can use the robot. Messages from members of
+  another organization (for example in a cross-organization group) are dropped without a
+  reply.
+
+---
+
+## Setup
+
+<Steps>
+<Step title="Create an enterprise-internal application">
+In the DingTalk developer console, create an enterprise-internal application in your
+organization and add the **robot** capability to it. Menu names change, so follow the
+console's current layout.
+</Step>
+<Step title="Set the robot to Stream mode">
+In the robot's settings, choose **Stream mode** as the message receiving mode (not HTTP
+callback), then **publish** the application so the change takes effect. Check the
+console for the exact wording.
+</Step>
+<Step title="Request permissions and set the availability scope">
+Request the API permissions the application needs to send robot messages, and set the
+application's availability scope so it includes the people who will chat with the
+robot. The permission names are not listed here because they have not been confirmed;
+use the permission the console offers for sending robot messages to single chats and to
+groups.
+</Step>
+<Step title="Copy the ClientID and ClientSecret">
+Copy the application's **ClientID** (also called AppKey) and **ClientSecret** (also called
+AppSecret) from the application's credentials page.
+
+<Warning>
+The ClientSecret is a full credential for your application. Don't paste it into chat, a
+repository, an issue, or a screenshot.
+</Warning>
+</Step>
+<Step title="Start IronClaw and enter the credentials (operator, once per instance)">
+```bash
+ironclaw serve
+```
+
+In the [web interface](/using/webui), open **Admin → Configuration** and find the
+**DingTalk deployment configuration** card. Enter the ClientID and the ClientSecret and
+save. Both values are stored in the encrypted secret store and are never shown again. You
+enter each of them once.
+</Step>
+<Step title="Install the extension">
+Open **Extensions**, find **DingTalk**, and install it. Activating the extension makes
+IronClaw connect to DingTalk.
+</Step>
+<Step title="Add the robot to a test group (optional)">
+To use the robot in a group, add the robot to that group in DingTalk. In groups the
+robot only answers messages that @mention it.
+</Step>
+</Steps>
+
+---
+
+## Check that it is connected
+
+The DingTalk card under **Extensions** shows the connection state.
+
+| State | Meaning | What to do |
+| --- | --- | --- |
+| **Connected** | IronClaw holds a Stream connection to DingTalk. | Nothing. |
+| **Reconnecting** | The connection dropped or an attempt failed. IronClaw retries with a growing delay. The last error code is shown. | Wait. If it persists, look the code up below. |
+| **Needs administrator** | IronClaw stopped retrying because retrying cannot help. The reason code is shown. | Fix the cause below, then save the configuration or reactivate the extension. |
+
+| Reason code | Likely cause |
+| --- | --- |
+| `credentials_refused`, `connect_unauthorized` | DingTalk refused the ClientID or ClientSecret. Re-copy both from the console, check there are no spaces, and confirm the application is published. |
+| `handshake_unauthorized` | DingTalk rejected the connection ticket. Reactivate the extension to request a new one; if it repeats, check the credentials. |
+| `connect_unavailable` | The connection request failed (network or DingTalk unavailable). Check that the host can reach `api.dingtalk.com` over HTTPS. |
+| `connection_limit` | IronClaw is already holding its maximum number of stream connections. Another stream extension must be deactivated first. |
+| `config_unavailable` | The deployment configuration is missing or incomplete. Fill in both fields of the DingTalk card. |
+| a network policy denial code | The gateway host DingTalk returned is not in the extension's declared host list. The host name `wss-open-connection.dingtalk.com` is **unverified**; report the code to the maintainers rather than working around it. |
+
+The card also reminds you to run a single instance per credential.
+
+---
+
+## Pair your account (each person)
+
+Setting up the application does not connect *you* to it. Pairing links your DingTalk
+account to your IronClaw user, and it is what stops a colleague from talking to your
+agent as you.
+
+1. In the web interface, open the DingTalk extension and choose **Connect DingTalk** to
+   generate a code.
+2. In DingTalk, open a **single chat** with the robot and send the code as the whole
+   message. Pairing only works in a single chat, not in a group.
+3. The robot answers that DingTalk is connected.
+
+What people who are not paired will see:
+
+- In a single chat, a message that is not a code gets a short reply asking them to
+  connect first.
+- In a group, an @mention from an unpaired member gets the same notice, **sent to that
+  member in a private single chat**, not into the group. At most one such notice is
+  sent per group in a short window.
+- Members of another organization get no reply at all.
+
+---
+
+## Using the robot
+
+- **Single chat:** send a message to the robot.
+- **Group:** @mention the robot. A group message that does not @mention the robot is
+  ignored. Each member who has paired talks to the agent as themselves.
+- Group messages are treated as untrusted text from another person, not as instructions
+  from you.
+- Long replies are split into several messages of up to 3,000 characters.
+
+### Messages the agent sends on its own
+
+When the agent sends a message that you did not just ask for (for example a scheduled
+result), it can send it **only to your own single chat** with the robot, after you have
+paired and chatted with the robot at least once. Sending to groups is not available yet,
+and the agent cannot message another person's single chat for you.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+<Accordion title="The card shows Needs administrator or Reconnecting">
+Use the state and reason-code tables above. Wrong credentials and a connection that
+cannot be established are the usual causes.
+</Accordion>
+<Accordion title="Connected, but the robot never answers">
+Check that the application is published after switching to Stream mode, that the robot
+capability is enabled, and that you are in the application's availability scope. Then
+check that you have paired: an unpaired single chat gets a "connect first" reply, and
+no reply at all points to the connection state or the availability scope.
+</Accordion>
+<Accordion title="It works in a single chat but not in a group">
+Add the robot to the group and @mention it in each message. Members of another
+organization (for example in a cross-organization group) are ignored.
+</Accordion>
+<Accordion title="Messages arrive but replies are not sent">
+Sending needs the permission to send robot messages and an availability scope that
+includes the recipient. Check both in the DingTalk console. Replies that cannot be
+confirmed are not resent automatically, to avoid duplicates; check the DingTalk chat
+and ask again if it is missing.
+</Accordion>
+<Accordion title="Colleagues from the same organization are ignored">
+IronClaw only accepts a message when the robot's organization and the sender's
+organization are both present and equal. If every message from your own colleagues is
+dropped, the callback may not carry the field IronClaw expects. Report this to the
+maintainers; do not retry with other credentials.
+</Accordion>
+<Accordion title="Two instances are fighting over messages">
+Stop the extra instance, or give it its own DingTalk application and credentials.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Security notes
+
+- The ClientID and ClientSecret live only in the encrypted secret store. They are not
+  written to `config.toml`, logs, or the card.
+- **Rotating the credentials:** reset the ClientSecret in the DingTalk console, enter the
+  new value in **Admin → Configuration**, save, and reactivate the extension. Until you
+  do, the connection fails with a credentials error.
+- **Known residue:** the one-time connection ticket DingTalk returns for the Stream
+  connection travels in the connection URL. IronClaw keeps its own copies in buffers that
+  are cleared after use, but the HTTP stack underneath may leave short-lived copies in
+  memory that IronClaw cannot clear.
+- IronClaw never uses the per-message reply webhook DingTalk puts in callbacks; replies
+  go through the OpenAPI with a token IronClaw exchanges for itself.

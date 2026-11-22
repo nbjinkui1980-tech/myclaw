@@ -83,6 +83,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Slack | ✅ | ✅ | - | WASM tool |
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
+| DingTalk | ❌ | ✅ | - | Reborn extension channel: enterprise-internal robot over Stream mode (no public address), single chat and group @mention, code pairing, push to the caller's own single chat; one organization per deployment; live-organization verification (plan Task 20) pending |
 | Feishu/Lark | ✅ | 🚧 | P3 | WASM channel with Event Subscription v2.0; Bitable/Docx tools planned |
 | WeCom | ✅ | 🚧 | P2 | Standalone WASM channel focused on WeCom intelligent bot WebSocket inbound/outbound, pairing, group sessions, inbound media hydration, and direct Bot media upload/send; self-built app callback + Agent API deferred |
 | LINE | ✅ | ❌ | P3 | |

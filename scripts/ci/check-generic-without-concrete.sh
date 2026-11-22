@@ -29,6 +29,7 @@ fi
 CONCRETE_CRATES=(
   ironclaw_slack_extension
   ironclaw_telegram_extension
+  ironclaw_dingtalk_extension
 )
 
 # dependent-crate:removal-phase — mirrors CONCRETE_DEPENDENCY_EXCEPTIONS.
@@ -46,6 +47,7 @@ EXCLUDED = {
     # Concrete extension crates (the deletion test subjects, not its scope).
     "ironclaw_slack_extension",
     "ironclaw_telegram_extension",
+    "ironclaw_dingtalk_extension",
     # The package inventory crate owns the concrete packages.
     "ironclaw_extension_support",
     # Sanctioned assemblers. NOTE: these are cargo *package* names, not crate

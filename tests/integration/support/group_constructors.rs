@@ -734,6 +734,50 @@ impl RebornIntegrationGroupBuilder {
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         Ok((self.into_group(base, capability).await?, egress, fixture))
     }
+    /// Build the DingTalk package group (DingTalk plan, Tasks 13–14): the
+    /// shipped `dingtalk` manifest installs through the production lifecycle,
+    /// the stream supervisor dials `connector`, and a fake DingTalk OpenAPI
+    /// answers connect, token exchange and sends behind the returned
+    /// recording egress.
+    pub(crate) async fn extension_runtime_dingtalk(
+        mut self,
+        connector: Arc<dyn ironclaw_network::WebSocketConnector>,
+    ) -> HarnessResult<(
+        RebornIntegrationGroup,
+        Arc<super::super::doubles::RecordingNetworkHttpEgress>,
+        Arc<super::super::harness::profiles::extension::DingTalkVendor>,
+    )> {
+        let base = self.build_base().await?;
+        let (profile, egress, vendor) =
+            super::super::harness::profiles::extension::extension_runtime_dingtalk_tools_profile(
+                connector,
+            )?;
+        let host_runtime = build_group_capability_with_base(profile, &base)
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_composition::test_support::build_channel_connection_for_test(
+                host_runtime.reborn_services_for_test().ok_or(
+                    "extension_runtime_dingtalk harness is missing its RebornServices bundle",
+                )?,
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        Ok((self.into_group(base, capability).await?, egress, vendor))
+    }
     /// Build a delivery-proof group. See
     /// [`RebornIntegrationGroup::extension_delivery`].
     pub async fn extension_delivery(mut self) -> HarnessResult<RebornIntegrationGroup> {
