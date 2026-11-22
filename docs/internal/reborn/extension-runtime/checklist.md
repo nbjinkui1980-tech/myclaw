@@ -135,8 +135,9 @@ Rules — kept short on purpose:
   functionality, outside the train's consolidation mandate. Upgrades exist only
   as silent boot-time adoption of bundled contracts
   (`migrate_host_bundled_manifest_hash`); first-party manifests change via
-  reviewed PRs. The classifier (`diff_resolved_contracts`,
-  `crates/extensions/ironclaw_extension_registry/src/resolved.rs`) exists and stays tested. Revisit
+  reviewed PRs. The classifier that exists is `classify_channel_egress_change`
+  (channel-egress axis only; `diff_resolved_contracts` was never written;
+  `crates/extensions/ironclaw_extension_registry/src/resolved.rs`) and stays tested. Revisit
   trigger: third-party/registry package distribution (overview §7). REL-1's
   sweep counts this row as dispositioned by owner decision.
 

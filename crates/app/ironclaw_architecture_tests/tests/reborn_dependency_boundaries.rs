@@ -880,7 +880,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // fixture family is added; supervision, I/O, and evidence minting stay
         // in ironclaw_extension_host. The new unit tests live in `tests/`, not
         // `src/`. Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 13_510),
+        // 13_510 -> 13_814 (2026-11-19, token exchange Task 11, ADR 6.2 option
+        // B): +304 lines of declaration vocabulary and shape validation only:
+        // `ChannelCredentialSourceDescriptor` / `ChannelCredentialSourceHeader`
+        // in the new `channel_credential_source` module (~200, including the
+        // exchange-endpoint-is-declared cross-check), the optional
+        // `ChannelEgressDescriptor.credential_source` field, the validator
+        // call, and two `ChannelDescriptorError` variants. Exchange, caching
+        // and injection stay in ironclaw_extension_host. Count read from this
+        // test's own failure message.
+        ("ironclaw_extension_contracts", 13_814),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

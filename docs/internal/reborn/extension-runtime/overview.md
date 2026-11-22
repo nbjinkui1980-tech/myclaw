@@ -316,6 +316,20 @@ Notes on the sections:
   lists preserve the legacy host+method policy. Path-placeholder credentials
   remain host-injected; the policy matcher evaluates the placeholder-bearing
   path, and the runtime substitutes the secret only after approval.
+  A target may instead declare **`[channel.egress.credential_source]`**: a
+  short-lived token the host exchanges for application credentials and injects
+  as a declared request header. The declaration names a logical token `handle`
+  (never an `[admin_configuration]` field, never stored), an `exchange_host`
+  plus a `[…exchange]` recipe (POST, path, static JSON body, and the secret
+  handles whose placement the exchange target's own `body_credentials` declare),
+  the RFC 6901 `token_pointer` and `expires_in_pointer` (seconds), and the
+  `[…header]` `name`/`prefix`. It is mutually exclusive with `credential_handle`,
+  `injection` and `body_credentials` on the same target, and the exchange
+  endpoint must be exactly one other declared https egress target. The host
+  keeps the token in memory only, refreshes it before expiry, single-flights the
+  exchange, and on a 401 exchanges again and resends once; an adapter opts in
+  per request by naming the handle and never sees token bytes. An egress change
+  that adds an exchange endpoint is *widening* (§3.3).
 - **`conversation_model`** (required on `[channel]`) classifies how external
   conversations map to IronClaw conversations:
   - `continuous` — the protocol supplies conversation identity; each external
@@ -422,8 +436,14 @@ resolved-contract diff classifies the change — equal / narrowed / **widening**
 *consent gate* is deliberately **not built** in this train (§7): packages are
 host-bundled, so a contract changes only via a reviewed binary release, and
 boot-time adoption of the new bundled record is the accepted path. The
-classifier (`diff_resolved_contracts`) ships as data-model code — the seed for
-a future registry/third-party-distribution trigger.
+classifier that exists today is `classify_channel_egress_change`
+(`ironclaw_extension_registry::resolved`): it covers the channel-egress axis
+only (reachable host/method/path grants, credential and body-credential
+placements, exchanged-token sources) and returns equal / narrowed / widened.
+It ships as data-model code — the seed for a future
+registry/third-party-distribution trigger. A full `diff_resolved_contracts`
+over scopes, effects and routes was described here earlier but was never
+written.
 
 ### 3.4 Standard messaging operations
 

@@ -909,6 +909,30 @@ fn validate_channel_admin_configuration(
                 "channel egress body credential",
             )?;
         }
+        if let Some(source) = &egress.credential_source {
+            for handle in &source.exchange.body_credentials {
+                require_field(
+                    handle,
+                    true,
+                    "channel egress credential source exchange credential",
+                )?;
+            }
+            // The exchanged token is a host-held logical name, never stored
+            // deployment configuration.
+            if descriptor.is_some_and(|descriptor| {
+                descriptor
+                    .fields
+                    .iter()
+                    .any(|field| field.handle == source.handle)
+            }) {
+                return Err(ManifestV3Error::Invalid {
+                    reason: format!(
+                        "channel egress credential source handle `{}` names an exchanged token and must not be declared in [admin_configuration].fields",
+                        source.handle.as_str()
+                    ),
+                });
+            }
+        }
     }
     if let Some(template) = channel
         .connection

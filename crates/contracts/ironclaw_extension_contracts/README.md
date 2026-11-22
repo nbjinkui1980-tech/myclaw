@@ -43,6 +43,12 @@ charter table lives in [`AGENTS.md`](./AGENTS.md)). The load-bearing entries:
   `ExtensionRuntime` + validated `ExtensionAssetPath` (resolution *under* a
   package root stays in the registry as
   `ironclaw_extension_registry::resolve_asset_under`, an orphan-rule cost).
+- `channel_credential_source` — the optional `[channel.egress.credential_source]`
+  declaration: a short-lived token the host exchanges for application
+  credentials (declared exchange endpoint, token and lifetime pointers in
+  seconds, injection header) and injects into outbound requests. Declaration
+  and validation only; the adapter names the token handle and never sees
+  bytes. Exchange and caching live in `ironclaw_extension_host`.
 - `channel` / `recipe` / `memory` / `product_adapter_section` — the
   declarative manifest surfaces a manifest compiles into (schema and
   cross-field invariants here; manifest *parsing* in the registry).

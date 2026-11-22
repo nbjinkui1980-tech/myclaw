@@ -33,6 +33,8 @@ const ACME_MANIFEST: &str =
 
 const ACME_STREAM_MANIFEST: &str =
     include_str!("../../../../tests/fixtures/extensions/acme-messenger-stream/manifest.toml");
+const ACME_TOKEN_MANIFEST: &str =
+    include_str!("../../../../tests/fixtures/extensions/acme-messenger-token/manifest.toml");
 fn contracts() -> HostApiContractRegistry {
     let mut registry = HostApiContractRegistry::new();
     registry
@@ -1837,4 +1839,209 @@ fn stream_ingress_rejects_webhook_fields_and_wildcard_hosts() {
     assert!(parse_v3(&mixed).is_err());
     let wildcard = ACME_STREAM_MANIFEST.replace("gateway.acme.example", "*.acme.example");
     assert!(parse_v3(&wildcard).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Token exchange (milestone 1b Task 11): `[channel.egress.credential_source]`
+// ---------------------------------------------------------------------------
+fn token_source_of(
+    resolved: &ironclaw_extension_registry::ResolvedExtensionManifest,
+) -> &ironclaw_extension_contracts::channel_credential_source::ChannelCredentialSourceDescriptor {
+    resolved
+        .channel
+        .as_ref()
+        .expect("channel declared")
+        .egress
+        .iter()
+        .find_map(|egress| egress.credential_source.as_ref())
+        .expect("a credential source is declared")
+}
+#[test]
+fn acme_token_fixture_resolves_the_source_and_round_trips() {
+    let record = parse_v3(ACME_TOKEN_MANIFEST).expect("acme token fixture must parse");
+    let resolved = record.resolved();
+    let source = token_source_of(resolved);
+    assert_eq!(source.handle.as_str(), "acme_access_token");
+    assert_eq!(source.exchange_host, "auth.acme.example");
+    assert_eq!(source.header.name, "x-acme-access-token");
+    let json = serde_json::to_string(resolved).expect("resolved serializes");
+    let stored: ironclaw_extension_registry::ResolvedExtensionManifest =
+        serde_json::from_str(&json).expect("resolved deserializes");
+    assert_eq!(&stored, resolved);
+    stored
+        .to_internal(ManifestSource::HostBundled)
+        .expect("resolved rehydrates");
+}
+#[test]
+fn manifests_without_a_source_resolve_without_the_key() {
+    // Read at run time (not `include_str!`): the cross-crate include scan is
+    // shrink-only and these bundled manifests belong to other crates.
+    let bundled = |package: &str| {
+        let path = format!(
+            "{}/../packages/{package}/manifest.toml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"))
+    };
+    let (slack, telegram) = (bundled("slack"), bundled("telegram"));
+    for (name, text) in [
+        ("acme", ACME_MANIFEST),
+        ("acme-stream", ACME_STREAM_MANIFEST),
+        ("slack", slack.as_str()),
+        ("telegram", telegram.as_str()),
+    ] {
+        let record = parse_v3(text).unwrap_or_else(|error| panic!("{name} parses: {error}"));
+        let json = serde_json::to_string(record.resolved()).expect("resolved serializes");
+        assert!(
+            !json.contains("credential_source"),
+            "{name} must resolve byte-identically: no credential_source key"
+        );
+    }
+}
+#[test]
+fn the_token_declaration_changes_the_manifest_digest() {
+    let without = ACME_TOKEN_MANIFEST.replace("[channel.egress.credential_source]", "[x]");
+    assert_ne!(
+        ironclaw_host_api::approval::sha256_digest_token(ACME_TOKEN_MANIFEST.as_bytes()),
+        ironclaw_host_api::approval::sha256_digest_token(without.as_bytes())
+    );
+}
+#[test]
+fn exchange_app_credentials_must_be_required_secret_admin_fields() {
+    let undeclared = ACME_TOKEN_MANIFEST.replace(
+        "body_credentials = [\"acme_app_key\", \"acme_app_secret\"]",
+        "body_credentials = [\"acme_app_key\", \"acme_undeclared_app_secret\"]",
+    );
+    assert!(
+        parse_v3(&undeclared).is_err(),
+        "an undeclared exchange credential must fail"
+    );
+    let not_secret = ACME_TOKEN_MANIFEST.replace(
+        "{ handle = \"acme_app_key\", label = \"App key\", secret = true, required = true }",
+        "{ handle = \"acme_app_key\", label = \"App key\", secret = false, required = true }",
+    );
+    let error = parse_v3(&not_secret).expect_err("a non-secret field cannot back an exchange");
+    assert!(error.contains("acme_app_key"), "{error}");
+}
+#[test]
+fn the_token_handle_is_never_an_admin_configuration_field() {
+    let toml = ACME_TOKEN_MANIFEST.replace(
+        "  { handle = \"acme_app_secret\"",
+        "  { handle = \"acme_access_token\", label = \"Token\", secret = true, required = false },\n  { handle = \"acme_app_secret\"",
+    );
+    let error = parse_v3(&toml).expect_err("the exchanged token must not be stored config");
+    assert!(error.contains("acme_access_token"), "{error}");
+}
+#[test]
+fn an_undeclared_exchange_endpoint_is_rejected_at_parse() {
+    let toml = ACME_TOKEN_MANIFEST.replace(
+        "exchange_host = \"auth.acme.example\"",
+        "exchange_host = \"other.acme.example\"",
+    );
+    assert!(parse_v3(&toml).is_err());
+}
+mod egress_change {
+    use super::*;
+    use ironclaw_extension_registry::{
+        ResolvedContractChange, ResolvedExtensionManifest, classify_channel_egress_change,
+    };
+    fn token() -> ResolvedExtensionManifest {
+        parse_v3(ACME_TOKEN_MANIFEST)
+            .expect("parses")
+            .resolved()
+            .clone()
+    }
+    fn egress_of(
+        resolved: &mut ResolvedExtensionManifest,
+    ) -> &mut Vec<ironclaw_extension_contracts::channel::ChannelEgressDescriptor> {
+        &mut resolved.channel.as_mut().expect("channel").egress
+    }
+    #[test]
+    fn identical_manifests_are_equal() {
+        assert_eq!(
+            classify_channel_egress_change(&token(), &token()),
+            ResolvedContractChange::Equal
+        );
+    }
+    #[test]
+    fn dropping_a_declared_path_narrows() {
+        let old = token();
+        let mut new = token();
+        let send = egress_of(&mut new)
+            .iter_mut()
+            .find(|e| e.paths == ["/v1/messages"])
+            .expect("send target");
+        send.paths.clear();
+        send.path_prefixes.clear();
+        // An empty path list means "any path" (legacy), which is wider, so
+        // narrow by dropping the whole target instead.
+        let mut narrowed = token();
+        egress_of(&mut narrowed).retain(|e| e.paths != ["/v1/streams/open"]);
+        assert_eq!(
+            classify_channel_egress_change(&old, &narrowed),
+            ResolvedContractChange::Narrowed
+        );
+        assert_eq!(
+            classify_channel_egress_change(&old, &new),
+            ResolvedContractChange::Widened,
+            "an emptied path list is the wide legacy policy"
+        );
+    }
+    #[test]
+    fn adding_a_credential_source_widens() {
+        let mut old = token();
+        for egress in egress_of(&mut old) {
+            egress.credential_source = None;
+        }
+        assert_eq!(
+            classify_channel_egress_change(&old, &token()),
+            ResolvedContractChange::Widened
+        );
+        assert_eq!(
+            classify_channel_egress_change(&token(), &old),
+            ResolvedContractChange::Narrowed
+        );
+    }
+    #[test]
+    fn a_new_exchange_endpoint_or_header_widens() {
+        let old = token();
+        let mut new_path = token();
+        let auth = egress_of(&mut new_path)
+            .iter_mut()
+            .find(|e| e.host == "auth.acme.example")
+            .expect("auth target");
+        auth.paths.push("/v1/oauth/other".to_string());
+        for egress in egress_of(&mut new_path) {
+            if let Some(source) = egress.credential_source.as_mut() {
+                source.exchange.path = "/v1/oauth/other".to_string();
+            }
+        }
+        assert_eq!(
+            classify_channel_egress_change(&old, &new_path),
+            ResolvedContractChange::Widened
+        );
+        let mut new_host = token();
+        for egress in egress_of(&mut new_host) {
+            if egress.host == "auth.acme.example" {
+                egress.host = "auth2.acme.example".to_string();
+            }
+            if let Some(source) = egress.credential_source.as_mut() {
+                source.exchange_host = "auth2.acme.example".to_string();
+            }
+        }
+        assert_eq!(
+            classify_channel_egress_change(&old, &new_host),
+            ResolvedContractChange::Widened
+        );
+        let mut new_header = token();
+        for egress in egress_of(&mut new_header) {
+            if let Some(source) = egress.credential_source.as_mut() {
+                source.header.name = "authorization".to_string();
+            }
+        }
+        assert_eq!(
+            classify_channel_egress_change(&old, &new_header),
+            ResolvedContractChange::Widened
+        );
+    }
 }

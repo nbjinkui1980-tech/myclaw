@@ -131,6 +131,10 @@ name = "ingress_router_contract"
 required-features = ["test-support"]
 
 [[test]]
+name = "channel_token_exchange_contract"
+required-features = ["test-support"]
+
+[[test]]
 name = "stream_supervisor_contract"
 required-features = ["test-support"]
 

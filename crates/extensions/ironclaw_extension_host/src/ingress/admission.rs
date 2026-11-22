@@ -590,13 +590,7 @@ pub(super) fn channel_restricted_egress(
     let declared = resolved
         .channel
         .as_ref()
-        .map(|channel| {
-            channel
-                .egress
-                .iter()
-                .map(DeclaredChannelEgress::from_descriptor)
-                .collect()
-        })
+        .map(|channel| DeclaredChannelEgress::from_descriptors(&channel.egress))
         .unwrap_or_default();
     Arc::new(PolicyEnforcedChannelEgress::new(
         extension_id,

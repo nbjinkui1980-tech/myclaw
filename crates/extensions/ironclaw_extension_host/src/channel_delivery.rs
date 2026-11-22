@@ -80,13 +80,7 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
                 .resolved
                 .channel
                 .as_ref()
-                .map(|channel| {
-                    channel
-                        .egress
-                        .iter()
-                        .map(DeclaredChannelEgress::from_descriptor)
-                        .collect()
-                })
+                .map(|channel| DeclaredChannelEgress::from_descriptors(&channel.egress))
                 .unwrap_or_default();
             let declared_egress_hosts = declared.iter().map(|egress| egress.host.clone()).collect();
             let egress = Arc::new(PolicyEnforcedChannelEgress::new(
@@ -132,13 +126,7 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             .resolved
             .channel
             .as_ref()
-            .map(|channel| {
-                channel
-                    .egress
-                    .iter()
-                    .map(DeclaredChannelEgress::from_descriptor)
-                    .collect()
-            })
+            .map(|channel| DeclaredChannelEgress::from_descriptors(&channel.egress))
             .unwrap_or_default();
         let declared_egress_hosts = declared.iter().map(|egress| egress.host.clone()).collect();
         let egress = Arc::new(PolicyEnforcedChannelEgress::new(

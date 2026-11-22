@@ -691,6 +691,49 @@ impl RebornIntegrationGroupBuilder {
         Ok((self.into_group(base, capability).await?, egress))
     }
 
+    /// Build the invented-vendor TOKEN-EXCHANGE fixture group: the stream
+    /// fixture plus host-side token exchange (milestone 1b Task 11). Returns
+    /// the recording egress every vendor call crosses and the fake vendor /
+    /// adapter send log.
+    pub(crate) async fn extension_runtime_acme_token(
+        mut self,
+        connector: Arc<dyn ironclaw_network::WebSocketConnector>,
+    ) -> HarnessResult<(
+        RebornIntegrationGroup,
+        Arc<super::super::doubles::RecordingNetworkHttpEgress>,
+        super::super::harness::profiles::extension::AcmeTokenFixture,
+    )> {
+        let base = self.build_base().await?;
+        let (profile, egress, fixture) =
+            super::super::harness::profiles::extension::extension_runtime_acme_token_tools_profile(
+                connector,
+            )?;
+        let host_runtime = build_group_capability_with_base(profile, &base)
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_composition::test_support::build_channel_connection_for_test(
+                host_runtime.reborn_services_for_test().ok_or(
+                    "extension_runtime_acme_token harness is missing its RebornServices bundle",
+                )?,
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        Ok((self.into_group(base, capability).await?, egress, fixture))
+    }
     /// Build a delivery-proof group. See
     /// [`RebornIntegrationGroup::extension_delivery`].
     pub async fn extension_delivery(mut self) -> HarnessResult<RebornIntegrationGroup> {

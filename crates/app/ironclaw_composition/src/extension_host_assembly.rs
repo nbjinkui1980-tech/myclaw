@@ -138,6 +138,18 @@ pub(crate) async fn build_backend_extension_host(
     let channel_egress_credential_bridges = Arc::clone(&channel_egress_credentials);
 
     let channel_egress_transport = host_runtime_http_egress.map(|port| {
+        // Outermost decorator: it serves `exchanged_token` for manifests that
+        // declare a `credential_source` and delegates every stored secret to
+        // the chain below, so the exchange's app credentials resolve through
+        // the same (test-bridged) port as any other channel secret.
+        let channel_egress_credentials =
+            Arc::new(
+                ironclaw_extension_host::channel_egress::token_exchange::TokenExchangeEgressCredentials::new(
+                    channel_egress_credentials,
+                    port.clone(),
+                    channel_egress_scope.clone(),
+                ),
+            );
         Arc::new(
             ironclaw_extension_host::channel_egress::HostRuntimeChannelEgressTransport::new(
                 port,
