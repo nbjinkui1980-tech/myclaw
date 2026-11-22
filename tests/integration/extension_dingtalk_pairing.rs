@@ -497,6 +497,15 @@ fn group_send_count(egress: &reborn_support::doubles::RecordingNetworkHttpEgress
 /// lifecycle tool, the runtime channel host's registration, then (when the
 /// journey runs frames through a run world) the test channel-host assembly,
 /// and finally the stream supervisor's dial.
+/// How the journey's administrator secrets reach the host.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Credentials {
+    /// The test injection point, before install (the pre-existing journeys).
+    Bridged,
+    /// Nothing at start; the test saves them through the administrator
+    /// configuration capability, the service the WebUI save uses.
+    AdministratorLater,
+}
 struct Journey {
     gateway: Gateway,
     group: RebornIntegrationGroup,
@@ -511,13 +520,18 @@ struct Journey {
 }
 impl Journey {
     async fn start(label: &str, with_assembly: bool) -> Self {
+        Self::start_with(label, with_assembly, Credentials::Bridged).await
+    }
+    async fn start_with(label: &str, with_assembly: bool, credentials: Credentials) -> Self {
         let gateway = Gateway::start().await;
         let (group, egress, vendor) = RebornIntegrationGroup::builder()
             .extension_runtime_dingtalk(loopback_connector(gateway.addr))
             .await
             .expect("dingtalk group builds");
         let services = reborn_services(&group);
-        bind_credentials(services);
+        if credentials == Credentials::Bridged {
+            bind_credentials(services);
+        }
         let inbound = group
             .thread(format!("conv-dingtalk-{label}-inbound"))
             .script([RebornScriptedReply::text("unused")])
@@ -587,7 +601,9 @@ impl Journey {
         } else {
             (None, None)
         };
-        wait_until(|| gateway.accepts() >= 1, "the stream supervisor's dial").await;
+        if credentials == Credentials::Bridged {
+            wait_until(|| gateway.accepts() >= 1, "the stream supervisor's dial").await;
+        }
         Self {
             gateway,
             group,
@@ -1299,4 +1315,191 @@ async fn server_error_journey() {
         "one OpenAPI request carried the reply (the run's separate working \
          indicator is a different message)"
     );
+}
+
+/// Save the DingTalk administrator secrets through `builtin.admin_configuration_replace`,
+/// the capability the WebUI extension-configuration save invokes.
+async fn configure_dingtalk_admin(group: &RebornIntegrationGroup, values: Value) {
+    use ironclaw_host_api::{
+        action::NetworkPolicy,
+        capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+        ids::{
+            CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProductKind,
+        },
+        invocation::InvocationOrigin,
+        mount::MountView,
+        resource::{ResourceEstimate, ResourceScope},
+        runtime::{RuntimeKind, TrustClass},
+        scope::{ExecutionContext, Principal},
+    };
+    let operator = ironclaw_host_api::ids::UserId::new("reborn-e2e-extension-lifecycle-tools")
+        .expect("operator user id");
+    let capability_id = CapabilityId::new("builtin.admin_configuration_replace")
+        .expect("admin configuration capability id");
+    let product_ingress = ExtensionId::new("ironclaw_webui").expect("product ingress id");
+    let invocation_id = InvocationId::new();
+    let runtime_scope = &group.shared.product_harness.scope;
+    let scope = ResourceScope {
+        tenant_id: runtime_scope.tenant_id.clone(),
+        user_id: operator.clone(),
+        agent_id: Some(runtime_scope.agent_id.clone().expect("runtime agent id")),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    };
+    let context = ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: scope.tenant_id.clone(),
+        user_id: operator.clone(),
+        authenticated_actor_user_id: Some(operator),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        run_id: None,
+        origin: Some(InvocationOrigin::Product(
+            ProductKind::new("webui").expect("product origin kind"),
+        )),
+        extension_id: product_ingress.clone(),
+        runtime: RuntimeKind::FirstParty,
+        trust: TrustClass::Sandbox,
+        grants: CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: capability_id.clone(),
+                grantee: Principal::Extension(product_ingress),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![
+                        EffectKind::ReadFilesystem,
+                        EffectKind::WriteFilesystem,
+                        EffectKind::DeleteFilesystem,
+                        EffectKind::UseSecret,
+                    ],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            }],
+        },
+        mounts: MountView::default(),
+        resource_scope: scope,
+    };
+    context
+        .validate()
+        .expect("admin capability context validates");
+    let outcome = reborn_services(group)
+        .host_runtime_for_test()
+        .expect("host runtime")
+        .invoke_capability((
+            context,
+            capability_id,
+            ResourceEstimate::default(),
+            json!({
+                "group_id": "extension.dingtalk",
+                "expected_revision": 0,
+                "values": values,
+            }),
+        ))
+        .await
+        .expect("admin configuration dispatch completes");
+    assert!(
+        matches!(
+            outcome,
+            ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+        ),
+        "admin configuration must complete through the authorized runtime, got {outcome:?}"
+    );
+}
+
+/// The host's redacted stream connection state for DingTalk, as the
+/// extensions page reads it.
+fn stream_connections(
+    services: &RebornRuntime,
+) -> std::collections::HashMap<
+    ironclaw_host_api::ids::ExtensionId,
+    ironclaw_product_contracts::lifecycle_service::ExtensionStreamConnection,
+> {
+    use ironclaw_extension_manager::extension_lifecycle_command::RebornExtensionLifecycleRuntime;
+    services
+        .extension_management()
+        .installation_stream_connections()
+}
+fn stream_state(
+    services: &RebornRuntime,
+) -> Option<(
+    ironclaw_product_contracts::lifecycle_service::ExtensionStreamState,
+    Option<String>,
+)> {
+    stream_connections(services)
+        .into_iter()
+        .find(|(id, _)| id.as_str() == EXTENSION)
+        .map(|(_, connection)| (connection.state, connection.last_error))
+}
+
+/// Production path: the secrets are saved through the administrator
+/// configuration capability after the connection stopped for missing
+/// credentials. The deployment-sourced stream must reconnect, and the connect
+/// body must carry the saved values, injected host-side.
+#[tokio::test]
+async fn dingtalk_administrator_saved_credentials_reach_the_connect_call_and_connect() {
+    Box::pin(administrator_saved_credentials_journey()).await;
+}
+async fn administrator_saved_credentials_journey() {
+    use ironclaw_product_contracts::lifecycle_service::ExtensionStreamState;
+    let journey = Box::pin(Journey::start_with(
+        "admin",
+        false,
+        Credentials::AdministratorLater,
+    ))
+    .await;
+    let (gateway, egress) = (&journey.gateway, &journey.egress);
+    let services = journey.services();
+    wait_until(
+        || {
+            stream_state(services)
+                == Some((
+                    ExtensionStreamState::NeedsAdministrator,
+                    Some("connect_credentials_missing".to_string()),
+                ))
+        },
+        "the connection to stop for missing credentials",
+    )
+    .await;
+    assert!(requests_to(egress, "/v1.0/gateway/connections/open").is_empty());
+    assert_eq!(gateway.accepts(), 0);
+    configure_dingtalk_admin(
+        &journey.group,
+        json!([
+            {"handle": "dingtalk_client_id", "value": DINGTALK_CLIENT_ID},
+            {"handle": "dingtalk_client_secret", "value": DINGTALK_CLIENT_SECRET},
+        ]),
+    )
+    .await;
+    wait_until(
+        || gateway.accepts() >= 1,
+        "the stream supervisor's dial after the administrator saved credentials",
+    )
+    .await;
+    wait_until(
+        || stream_state(services) == Some((ExtensionStreamState::Connected, None)),
+        "the connection state to become connected",
+    )
+    .await;
+    let connect = requests_to(egress, "/v1.0/gateway/connections/open");
+    let connect = connect.last().expect("a connect call");
+    let body: Value = serde_json::from_slice(&connect.body).expect("JSON");
+    assert_eq!(body["clientId"], DINGTALK_CLIENT_ID);
+    assert_eq!(body["clientSecret"], DINGTALK_CLIENT_SECRET);
+    assert_connect_request_carries_no_header_credential(connect);
+    let rendered = format!("{:?}", stream_connections(services));
+    assert!(!rendered.contains(DINGTALK_CLIENT_SECRET));
+    assert!(!rendered.contains(DINGTALK_CLIENT_ID));
 }
