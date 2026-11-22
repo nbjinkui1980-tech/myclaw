@@ -21,6 +21,11 @@ mod reply;
 mod reply_context;
 mod send;
 mod stream;
+/// The package manifest, embedded crate-locally so the binary can put the
+/// package in the first-party catalog (the same shape as the web-app package;
+/// see `crates/app/ironclaw_cli/src/first_party/bundles.rs`).
+pub const MANIFEST: &str = include_str!("../manifest.toml");
+
 pub use channel::{DingTalkChannel, DingTalkChannelAdapter, dingtalk_channel};
 pub use preference_targets::DingTalkPreferenceTargetCodec;
 pub use stream::DingTalkStreamControl;
