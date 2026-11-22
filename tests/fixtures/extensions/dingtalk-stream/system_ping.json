@@ -1,0 +1,13 @@
+{
+  "specVersion": "1.0",
+  "type": "SYSTEM",
+  "headers": {
+    "appId": "REDACTED_APP_ID",
+    "connectionId": "REDACTED_CONNECTION_ID",
+    "contentType": "application/json",
+    "messageId": "REDACTED_MESSAGE_ID_PING",
+    "time": "1700000000000",
+    "topic": "ping"
+  },
+  "data": "{\"opaque\": \"REDACTED_PING_PAYLOAD\"}"
+}
