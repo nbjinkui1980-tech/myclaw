@@ -262,6 +262,8 @@ impl UnusedServices {
                     tools: Vec::new(),
                     installation_state: LifecyclePublicState::SetupNeeded,
                     activation_error: None,
+                    stream_connection: None,
+                    stream_summary: None,
                     version: None,
                     onboarding: None,
                     auth_accounts: Vec::new(),

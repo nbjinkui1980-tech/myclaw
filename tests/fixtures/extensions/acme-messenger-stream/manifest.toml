@@ -1,0 +1,73 @@
+# The invented-vendor STREAMING fixture (stream-ingress Task 3). Same invented
+# vendor as `acme-messenger`, but inbound events arrive over a connection the
+# host dials out (`[channel.ingress.stream]`) instead of a mounted webhook.
+# Shared by every milestone-one stream test; hosts and handles are part of the
+# inventory the specificity scanner derives from, like its webhook sibling.
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-messenger-stream"
+name = "Acme Messenger (stream)"
+version = "0.1.0"
+description = "Invented-vendor fixture: a stream-ingress channel for the generic extension runtime's supervisor and conformance suites."
+trust = "first_party_requested"
+
+[admin_configuration]
+group_id = "vendor.acme_stream"
+display_name = "Acme stream deployment configuration"
+description = "Deployment credentials for the Acme stream channel."
+fields = [
+  { handle = "acme_client_id", label = "Client ID", secret = false, required = true },
+  { handle = "acme_client_secret", label = "Client secret", secret = true, required = true },
+]
+
+[runtime]
+kind = "first_party"
+service = "acme-messenger-stream.extension/v1"
+
+[channel]
+id = "messages"
+display_name = "Acme stream messages"
+conversation_model = "continuous"
+
+[channel.reply]
+transport = "message"
+
+[channel.ingress.stream]
+url_template = "{endpoint}?ticket={ticket}"
+hosts = ["gateway.acme.example"]
+max_frame_bytes = 262144
+max_frames_per_second = 50
+
+[channel.ingress.stream.connect]
+method = "post"
+path = "/v1/streams/open"
+body = { clientId = "{acme_client_id}" }
+body_credentials = ["acme_client_secret"]
+
+[channel.ingress.stream.response]
+endpoint = "/endpoint"
+ticket = "/ticket"
+
+[[channel.ingress.stream.subscriptions]]
+type = "EVENT"
+topic = "/v1/messages/get"
+
+[channel.ingress.stream.keepalive]
+ping_interval_secs = 60
+pong_timeout_secs = 10
+
+[[channel.egress]]
+scheme = "https"
+host = "api.acme.example"
+methods = ["post"]
+paths = ["/v1/streams/open"]
+credential_handle = "acme_client_secret"
+request_body_limit_bytes = 8192
+response_body_limit_bytes = 8192
+
+[[channel.egress.body_credentials]]
+handle = "acme_client_secret"
+pointer = "/clientSecret"
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = false

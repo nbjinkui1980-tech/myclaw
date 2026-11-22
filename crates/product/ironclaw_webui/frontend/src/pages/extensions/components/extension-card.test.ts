@@ -473,6 +473,39 @@ test("failed extension renders its activation_error as a danger reason banner", 
   );
 });
 
+test("a stream channel renders the host's connection summary and no secrets", () => {
+  const summary =
+    "Disconnected from the vendor stream; reconnecting. Last error: connect_unavailable. Run only one IronClaw instance per application credential; a second instance (or environment) using the same credentials can take messages.";
+  const rendered = renderExtensionCard({
+    package_ref: { id: "acme-stream" },
+    runtime: "first_party",
+    display_name: "Acme stream",
+    installation_state: "active",
+    stream_connection: { state: "reconnecting", last_error: "connect_unavailable" },
+    stream_summary: summary,
+  });
+  assert.equal(
+    renderedContainsValue(rendered, summary),
+    true,
+    "the redacted backend summary is rendered verbatim",
+  );
+  assert.equal(
+    renderedContainsValue(rendered, "reconnecting"),
+    true,
+    "the state is exposed on the banner",
+  );
+  const absent = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    display_name: "Acme",
+    installation_state: "active",
+  });
+  assert.equal(
+    renderedContainsValue(absent, "extension-stream-connection"),
+    false,
+    "an extension without a stream renders no connection banner",
+  );
+});
 test("disconnected auth accounts render a distinct reason per last_error, not a generic expiry notice (G4)", () => {
   // A revoked grant is disconnected-with-a-reason, not the `expired` state —
   // it must still offer Reconnect with its own copy, not the refresh_failed

@@ -884,9 +884,19 @@ fn validate_channel_admin_configuration(
     if let Some(handle) = channel
         .ingress
         .as_ref()
-        .and_then(|ingress| ingress.verification.secret_handle())
+        .and_then(|ingress| ingress.webhook_verification())
+        .and_then(|verification| verification.secret_handle())
     {
         require_field(handle, true, "channel ingress verification")?;
+    }
+    if let Some(stream) = channel
+        .ingress
+        .as_ref()
+        .and_then(|ingress| ingress.stream())
+    {
+        for handle in &stream.connect.body_credentials {
+            require_field(handle, true, "channel stream connect body credential")?;
+        }
     }
     for egress in &channel.egress {
         if let Some(handle) = &egress.credential_handle {

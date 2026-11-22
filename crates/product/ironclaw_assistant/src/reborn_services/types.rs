@@ -261,6 +261,18 @@ pub struct RebornExtensionInfo {
     /// Redacted internal setup/publication failure; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
+    /// Host connection state of a stream-ingress channel (`connecting`,
+    /// `connected`, `reconnecting`, `needs_administrator`), with a redacted
+    /// reason code. Present only for active stream-ingress extensions. The
+    /// browser renders it and never infers connection state itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_connection:
+        Option<ironclaw_product_contracts::lifecycle_service::ExtensionStreamConnection>,
+    /// Redacted, human-readable rendering of `stream_connection`, including
+    /// the single-instance-per-credential notice (ADR 9). Contains no
+    /// endpoint, ticket, credential, or vendor text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

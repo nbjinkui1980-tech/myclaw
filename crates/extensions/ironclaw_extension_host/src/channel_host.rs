@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel::{
-    ChannelConnectionDescriptor, ChannelConnectionStrategy,
+    ChannelConnectionDescriptor, ChannelConnectionStrategy, ChannelIngressTransport,
 };
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
@@ -62,7 +62,8 @@ use crate::channel_pairing::ChannelPairingConsumeOutcome;
 use crate::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ChannelPairingOutcomeObserver, ExtensionIngressRegistry, GenericChannelInboundSink,
-    ManagedRegistrationOutcome, PostAdmissionObserver, VerifiedEvidenceMint,
+    ManagedRegistrationOutcome, PostAdmissionObserver, STREAM_CONNECTION_RECIPE_LABEL,
+    VerifiedEvidenceMint,
 };
 use ironclaw_extension_host::ChannelConfigService;
 use ironclaw_product_contracts::admin_users::AdminUserService;
@@ -179,6 +180,27 @@ pub fn evidence_mint_for_verification(
         // `authenticated_session` channel mounts no webhook route at all — its
         // T1 evidence is minted by the host's authenticated transport, not here.
         IngressVerificationRecipe::AuthenticatedSession | IngressVerificationRecipe::None => None,
+    }
+}
+
+/// Derive the trusted-evidence shape from a channel's declared ingress
+/// transport (ADR 3 touchpoint 5). Webhook transports mirror their
+/// verification recipe exactly as [`evidence_mint_for_verification`] does.
+/// Stream transports mint connection-level evidence, which the stream
+/// supervisor applies only to frames read from a connection it dialed and
+/// authenticated for the owning installation. Session transports mint nothing
+/// here: their T1 evidence comes from the host's authenticated transport.
+pub fn evidence_mint_for_transport(
+    transport: &ChannelIngressTransport,
+) -> Option<VerifiedEvidenceMint> {
+    match transport {
+        ChannelIngressTransport::Webhook { verification, .. } => {
+            evidence_mint_for_verification(verification)
+        }
+        ChannelIngressTransport::Stream(_) => Some(VerifiedEvidenceMint::AuthenticatedStream {
+            connection_recipe: STREAM_CONNECTION_RECIPE_LABEL.to_string(),
+        }),
+        ChannelIngressTransport::AuthenticatedSession => None,
     }
 }
 
@@ -671,20 +693,31 @@ impl GenericChannelHostAssembly {
         let Some(ingress) = channel.ingress.as_ref() else {
             return Ok(None);
         };
-        let Some(evidence) = evidence_mint_for_verification(&ingress.verification) else {
+        // The sink's evidence follows the declared transport: webhook mirrors
+        // its verification recipe, stream mints connection-level evidence (only
+        // the stream supervisor ever calls `admit` for it, with the installation
+        // that owns the connection), and session ingress is host-owned.
+        let Some(evidence) = evidence_mint_for_transport(&ingress.transport) else {
             return Ok(None);
         };
-        let Some(secret_handle) = ingress.verification.secret_handle() else {
-            return Ok(None);
-        };
-
-        let secrets = Arc::new(ChannelConfigIngressSecrets {
-            channel_config: Arc::clone(&self.deps.channel_config),
-            extension_id: ExtensionId::new(source.extension_id())
-                .map_err(|error| format!("invalid extension id: {error}"))?,
-            handle: secret_handle.clone(),
-            installation_id: source.installation_id().to_string(),
-        });
+        // Per-request verification secrets exist only for webhook ingress. A
+        // stream mounts no route, so its secrets port is never consulted.
+        let secrets: Arc<dyn crate::ingress::IngressSecretsPort> =
+            match ingress.webhook_verification() {
+                Some(verification) => {
+                    let Some(secret_handle) = verification.secret_handle() else {
+                        return Ok(None);
+                    };
+                    Arc::new(ChannelConfigIngressSecrets {
+                        channel_config: Arc::clone(&self.deps.channel_config),
+                        extension_id: ExtensionId::new(source.extension_id())
+                            .map_err(|error| format!("invalid extension id: {error}"))?,
+                        handle: secret_handle.clone(),
+                        installation_id: source.installation_id().to_string(),
+                    })
+                }
+                None => Arc::new(StreamIngressSecrets),
+            };
         let configuration = Arc::new(ChannelConfigIngressConfiguration {
             channel_config: Arc::clone(&self.deps.channel_config),
             extension_id: ExtensionId::new(source.extension_id())
@@ -1045,6 +1078,22 @@ impl ProductActorUserResolver for OperatorActorUserResolver {
 /// per request, so a configure save takes effect on the next webhook with
 /// no route rebuild. No stored secret -> no candidates -> the generic
 /// router rejects 401.
+/// Verification-secrets port for stream ingress, which has no per-request
+/// verification: nothing to look up, so it yields no candidates.
+struct StreamIngressSecrets;
+
+#[async_trait]
+impl IngressSecretsPort for StreamIngressSecrets {
+    async fn verification_candidates(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+        _handle: Option<&SecretHandle>,
+    ) -> Result<Vec<VerificationCandidate>, IngressPortError> {
+        Ok(Vec::new())
+    }
+}
+
 struct ChannelConfigIngressSecrets {
     channel_config: Arc<ChannelConfigService>,
     extension_id: ExtensionId,
@@ -1472,6 +1521,45 @@ mod tests {
         );
     }
 
+    fn ingress_transport_of(
+        manifest: ironclaw_extension_registry::ResolvedExtensionManifest,
+    ) -> ChannelIngressTransport {
+        manifest
+            .channel
+            .expect("fixture declares a channel")
+            .ingress
+            .expect("fixture declares ingress")
+            .transport
+    }
+    /// ADR 3 touchpoint 5: the mint is derived from the declared transport. A
+    /// stream channel yields connection-level evidence whose recipe label is
+    /// the host's fixed tag, never anything read from the manifest or a frame.
+    #[test]
+    fn stream_transport_mints_connection_level_evidence() {
+        let transport = ingress_transport_of(crate::test_support::stream_channel_manifest());
+        match evidence_mint_for_transport(&transport) {
+            Some(VerifiedEvidenceMint::AuthenticatedStream { connection_recipe }) => {
+                assert_eq!(connection_recipe, STREAM_CONNECTION_RECIPE_LABEL);
+            }
+            other => panic!("expected a stream mint, got {other:?}"),
+        }
+    }
+    #[test]
+    fn webhook_transport_mint_mirrors_its_verification_recipe() {
+        let transport = ingress_transport_of(crate::test_support::channel_only_manifest());
+        let ChannelIngressTransport::Webhook { verification, .. } = &transport else {
+            panic!("the webhook fixture must declare a webhook transport");
+        };
+        let by_transport = evidence_mint_for_transport(&transport).map(|mint| format!("{mint:?}"));
+        let by_recipe =
+            evidence_mint_for_verification(verification).map(|mint| format!("{mint:?}"));
+        assert_eq!(by_transport, by_recipe);
+    }
+    #[test]
+    fn session_transport_mints_no_channel_evidence() {
+        let transport = ingress_transport_of(crate::test_support::session_channel_manifest());
+        assert!(evidence_mint_for_transport(&transport).is_none());
+    }
     #[test]
     fn none_recipe_mints_nothing() {
         assert!(evidence_mint_for_verification(&IngressVerificationRecipe::None).is_none());

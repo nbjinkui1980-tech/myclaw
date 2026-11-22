@@ -1935,3 +1935,27 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         "provider id must not appear in Debug output; got: {debug_with_requirement}"
     );
 }
+
+#[test]
+fn network_scheme_wss_serializes_as_snake_case_and_round_trips() {
+    // `Wss` is the outbound-WebSocket scheme (stream-ingress ADR 1.1). It must
+    // keep the wire spelling stable: `"wss"` inside every persisted
+    // `NetworkTarget` / `NetworkTargetPattern`.
+    assert_eq!(
+        serde_json::to_value(NetworkScheme::Wss).unwrap(),
+        json!("wss")
+    );
+    assert_eq!(
+        serde_json::from_value::<NetworkScheme>(json!("wss")).unwrap(),
+        NetworkScheme::Wss
+    );
+    let pattern = NetworkTargetPattern {
+        scheme: Some(NetworkScheme::Wss),
+        host_pattern: "gateway.example.test".to_string(),
+        port: Some(443),
+    };
+    assert!(pattern.validate_declaration().is_ok());
+    let round_trip: NetworkTargetPattern =
+        serde_json::from_value(serde_json::to_value(&pattern).unwrap()).unwrap();
+    assert_eq!(round_trip, pattern);
+}

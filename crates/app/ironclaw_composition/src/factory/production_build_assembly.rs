@@ -22,6 +22,8 @@ pub(super) async fn build_production_shaped(
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
+        stream_connector_for_test,
+        #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
         memory_binding_policy,
         memory_provider_connection,
@@ -96,6 +98,8 @@ pub(super) async fn build_production_shaped(
         default_system_prompt_path: None,
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
+        #[cfg(any(test, feature = "test-support"))]
+        stream_connector_for_test,
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
     };
@@ -413,6 +417,8 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     pub(super) network_http_egress_for_test: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) stream_connector_for_test: Option<Arc<dyn ironclaw_network::WebSocketConnector>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(super) trust_fixture_extensions_for_test: bool,
 }

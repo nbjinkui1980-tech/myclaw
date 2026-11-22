@@ -388,25 +388,12 @@ impl ChannelDescriptor {
             connection.validate()?;
         }
         if let Some(ingress) = &self.ingress {
-            ingress
-                .verification
-                .validate()
-                .map_err(ChannelDescriptorError::Verification)?;
-            // Pair the ingress trust class with the mount: authenticated_session
-            // ingress is verified upstream by the host transport (T1) and mounts
-            // no webhook route, so it must NOT carry a route_suffix; every
-            // webhook recipe (T2) MUST, or there is no route to receive on.
-            match (
-                ingress.verification.is_authenticated_session(),
-                ingress.route_suffix.is_some(),
-            ) {
-                (true, true) => {
-                    return Err(ChannelDescriptorError::SessionIngressWithRouteSuffix);
-                }
-                (false, false) => {
-                    return Err(ChannelDescriptorError::WebhookIngressWithoutRouteSuffix);
-                }
-                _ => {}
+            match &ingress.transport {
+                ChannelIngressTransport::Webhook { verification, .. } => verification
+                    .validate()
+                    .map_err(ChannelDescriptorError::Verification)?,
+                ChannelIngressTransport::Stream(stream) => stream.validate()?,
+                ChannelIngressTransport::AuthenticatedSession => {}
             }
             // The recipe lists share ONE lifecycle deadline while the host
             // holds the global lifecycle lock — bound them so a manifest
@@ -420,6 +407,11 @@ impl ChannelDescriptor {
         for egress in &self.egress {
             if egress.host.trim().is_empty() || egress.host.contains('*') {
                 return Err(ChannelDescriptorError::WildcardOrEmptyEgressHost {
+                    host: egress.host.clone(),
+                });
+            }
+            if egress.scheme == NetworkScheme::Wss {
+                return Err(ChannelDescriptorError::UnsupportedEgressScheme {
                     host: egress.host.clone(),
                 });
             }
@@ -637,8 +629,14 @@ pub enum ChannelVendorCallMethod {
 }
 
 /// Ingress declaration for an inbound channel.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// The transport is a tagged enum ([`ChannelIngressTransport`]); the manifest
+/// wire shape stays flat and backward compatible. `route_suffix` plus a
+/// `verification` recipe declare a webhook, `verification.kind =
+/// "authenticated_session"` declares the host session door, and a
+/// `[channel.ingress.stream]` table declares a vendor-pushed stream. The
+/// three are mutually exclusive and an invalid mix fails to parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelIngressDescriptor {
     /// Idempotent vendor-side wiring run at activation — telling the vendor
     /// where to POST. Every input is already known to the host (it owns the
@@ -646,33 +644,337 @@ pub struct ChannelIngressDescriptor {
     /// and not a method. Absent means no registration is needed: a vendor
     /// whose events URL is configured in its own app console, or a channel
     /// with no webhook at all.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registration: Option<ChannelVendorCallRecipe>,
     /// Idempotent, best-effort vendor-side unwiring run at deactivation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deregistration: Option<ChannelVendorCallRecipe>,
     /// Additional idempotent vendor-side surface wiring run at activation,
     /// after `registration` and in declared order — e.g. publishing the
     /// channel's declared `commands` to the vendor's native command menu.
     /// Same recipe grammar, same restricted egress, same fail-closed
     /// activation semantics as `registration`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activation_calls: Vec<ChannelVendorCallRecipe>,
     /// Best-effort counterparts run at deactivation, after `deregistration`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deactivation_calls: Vec<ChannelVendorCallRecipe>,
-    /// Present for webhook ingress (the mounted route's last path segment);
-    /// absent for `authenticated_session` ingress, which mounts no webhook
-    /// route. The pairing is enforced by [`ChannelDescriptor::validate`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route_suffix: Option<RouteSuffix>,
-    #[serde(default)]
     pub method: ChannelIngressMethod,
-    #[serde(default = "default_body_limit_bytes")]
     pub body_limit_bytes: u64,
-    /// Required and explicit — `kind = "none"` must be declared, never
-    /// defaulted.
-    pub verification: IngressVerificationRecipe,
+    pub transport: ChannelIngressTransport,
+}
+/// How inbound events reach the host. The variant, not optional fields,
+/// decides which of `route_suffix`, `verification`, and the stream
+/// declaration exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelIngressTransport {
+    /// A mounted webhook route verified per request by a host-run recipe.
+    Webhook {
+        /// The mounted route's last path segment.
+        route_suffix: RouteSuffix,
+        verification: IngressVerificationRecipe,
+    },
+    /// The host dials out and reads vendor frames from one connection.
+    Stream(Box<ChannelStreamDescriptor>),
+    /// Verified upstream by the host session transport; mounts no route.
+    AuthenticatedSession,
+}
+impl ChannelIngressDescriptor {
+    /// The webhook route suffix; `None` for stream and session ingress.
+    pub fn route_suffix(&self) -> Option<&RouteSuffix> {
+        match &self.transport {
+            ChannelIngressTransport::Webhook { route_suffix, .. } => Some(route_suffix),
+            _ => None,
+        }
+    }
+    /// The per-request verification recipe; `None` unless webhook ingress.
+    pub fn webhook_verification(&self) -> Option<&IngressVerificationRecipe> {
+        match &self.transport {
+            ChannelIngressTransport::Webhook { verification, .. } => Some(verification),
+            _ => None,
+        }
+    }
+    pub fn stream(&self) -> Option<&ChannelStreamDescriptor> {
+        match &self.transport {
+            ChannelIngressTransport::Stream(stream) => Some(stream),
+            _ => None,
+        }
+    }
+    pub fn is_authenticated_session(&self) -> bool {
+        matches!(
+            self.transport,
+            ChannelIngressTransport::AuthenticatedSession
+        )
+    }
+}
+/// Flat manifest wire shape of [`ChannelIngressDescriptor`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IngressWire {
+    #[serde(default)]
+    registration: Option<ChannelVendorCallRecipe>,
+    #[serde(default)]
+    deregistration: Option<ChannelVendorCallRecipe>,
+    #[serde(default)]
+    activation_calls: Vec<ChannelVendorCallRecipe>,
+    #[serde(default)]
+    deactivation_calls: Vec<ChannelVendorCallRecipe>,
+    #[serde(default)]
+    route_suffix: Option<RouteSuffix>,
+    #[serde(default)]
+    method: ChannelIngressMethod,
+    #[serde(default)]
+    body_limit_bytes: Option<u64>,
+    #[serde(default)]
+    verification: Option<IngressVerificationRecipe>,
+    #[serde(default)]
+    stream: Option<ChannelStreamDescriptor>,
+}
+#[derive(Serialize)]
+struct IngressWireRef<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration: Option<&'a ChannelVendorCallRecipe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deregistration: Option<&'a ChannelVendorCallRecipe>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    activation_calls: &'a [ChannelVendorCallRecipe],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    deactivation_calls: &'a [ChannelVendorCallRecipe],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_suffix: Option<&'a RouteSuffix>,
+    method: ChannelIngressMethod,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_limit_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification: Option<&'a IngressVerificationRecipe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<&'a ChannelStreamDescriptor>,
+}
+impl Serialize for ChannelIngressDescriptor {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let session = IngressVerificationRecipe::AuthenticatedSession;
+        IngressWireRef {
+            registration: self.registration.as_ref(),
+            deregistration: self.deregistration.as_ref(),
+            activation_calls: &self.activation_calls,
+            deactivation_calls: &self.deactivation_calls,
+            route_suffix: self.route_suffix(),
+            method: self.method,
+            // Stream ingress is bounded by `max_frame_bytes`; the webhook
+            // body limit is not part of its wire shape.
+            body_limit_bytes: match &self.transport {
+                ChannelIngressTransport::Stream(_) => None,
+                _ => Some(self.body_limit_bytes),
+            },
+            verification: match &self.transport {
+                ChannelIngressTransport::Webhook { verification, .. } => Some(verification),
+                ChannelIngressTransport::AuthenticatedSession => Some(&session),
+                ChannelIngressTransport::Stream(_) => None,
+            },
+            stream: self.stream(),
+        }
+        .serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for ChannelIngressDescriptor {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let wire = IngressWire::deserialize(deserializer)?;
+        let transport = match (wire.stream, wire.verification, wire.route_suffix) {
+            (Some(stream), None, None) if wire.body_limit_bytes.is_none() => {
+                ChannelIngressTransport::Stream(Box::new(stream))
+            }
+            (Some(_), _, _) => {
+                return Err(D::Error::custom(
+                    ChannelDescriptorError::StreamIngressWithWebhookFields,
+                ));
+            }
+            (None, None, _) => return Err(D::Error::missing_field("verification")),
+            (None, Some(verification), route_suffix) => {
+                match (verification.is_authenticated_session(), route_suffix) {
+                    (true, None) => ChannelIngressTransport::AuthenticatedSession,
+                    (true, Some(_)) => {
+                        return Err(D::Error::custom(
+                            ChannelDescriptorError::SessionIngressWithRouteSuffix,
+                        ));
+                    }
+                    (false, Some(route_suffix)) => ChannelIngressTransport::Webhook {
+                        route_suffix,
+                        verification,
+                    },
+                    (false, None) => {
+                        return Err(D::Error::custom(
+                            ChannelDescriptorError::WebhookIngressWithoutRouteSuffix,
+                        ));
+                    }
+                }
+            }
+        };
+        Ok(Self {
+            registration: wire.registration,
+            deregistration: wire.deregistration,
+            activation_calls: wire.activation_calls,
+            deactivation_calls: wire.deactivation_calls,
+            method: wire.method,
+            body_limit_bytes: wire
+                .body_limit_bytes
+                .unwrap_or_else(default_body_limit_bytes),
+            transport,
+        })
+    }
+}
+/// `[channel.ingress.stream]`: the host dials one vendor connection per
+/// active installation and reads frames from it.
+///
+/// Declarations only. The connect call reuses [`ChannelVendorCallRecipe`] so
+/// the credentials ride the existing `body_credentials` injection and the
+/// adapter never sees them. The `ticket` the connect response yields is a
+/// secret: it exists only inside the host's connector and in the URL built
+/// from `url_template`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelStreamDescriptor {
+    /// The call that opens a connection grant.
+    pub connect: ChannelVendorCallRecipe,
+    /// Where the connect response carries the endpoint and the secret ticket.
+    pub response: ChannelStreamResponseMap,
+    /// Topics subscribed at connect time.
+    pub subscriptions: Vec<ChannelStreamSubscription>,
+    /// Connection URL; the only placeholders are `{endpoint}` and `{ticket}`.
+    pub url_template: String,
+    /// Exact hosts the connection may reach. No wildcards; the host checks the
+    /// resolved endpoint against this list before dialing.
+    pub hosts: Vec<String>,
+    pub keepalive: ChannelStreamKeepalive,
+    /// Largest accepted frame.
+    pub max_frame_bytes: u32,
+    /// Per-connection frame rate ceiling.
+    pub max_frames_per_second: u32,
+}
+/// RFC 6901 pointers into the connect response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelStreamResponseMap {
+    pub endpoint: String,
+    /// Points at a secret: never logged, stored, or put in an error.
+    pub ticket: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelStreamSubscription {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub topic: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelStreamKeepalive {
+    pub ping_interval_secs: u32,
+    pub pong_timeout_secs: u32,
+}
+/// Largest `max_frame_bytes` a stream may declare: the network layer's
+/// frame ceiling (pinned equal by the extension host's tests), so every
+/// accepted declaration is enforceable as written.
+pub const MAX_STREAM_FRAME_BYTES: u32 = 1024 * 1024;
+/// Largest `max_frames_per_second` a stream may declare: half the network
+/// layer's hard rate ceiling, so the 2x hard-cap headroom always holds.
+pub const MAX_STREAM_FRAMES_PER_SECOND: u32 = 500;
+const MAX_STREAM_HOSTS: usize = 8;
+const MAX_STREAM_SUBSCRIPTIONS: usize = 8;
+const MAX_STREAM_TEXT_BYTES: usize = 256;
+const MAX_STREAM_PING_INTERVAL_SECS: u32 = 300;
+const MAX_STREAM_PONG_TIMEOUT_SECS: u32 = 120;
+impl ChannelStreamDescriptor {
+    fn validate(&self) -> Result<(), ChannelDescriptorError> {
+        let invalid = |field: &'static str| ChannelDescriptorError::InvalidStreamIngress { field };
+        let bounded_text = |value: &str| {
+            !value.is_empty()
+                && value.len() <= MAX_STREAM_TEXT_BYTES
+                && !value.chars().any(char::is_control)
+        };
+        if !self.connect.path.starts_with('/') || self.connect.path.contains(['?', '#']) {
+            return Err(invalid("connect.path"));
+        }
+        for (field, pointer) in [
+            ("response.endpoint", &self.response.endpoint),
+            ("response.ticket", &self.response.ticket),
+        ] {
+            if !pointer.starts_with('/') || !bounded_text(pointer) {
+                return Err(invalid(field));
+            }
+        }
+        if self.response.endpoint == self.response.ticket {
+            return Err(invalid("response.ticket"));
+        }
+        if self.subscriptions.len() > MAX_STREAM_SUBSCRIPTIONS
+            || self
+                .subscriptions
+                .iter()
+                .any(|s| !bounded_text(&s.kind) || !bounded_text(&s.topic))
+        {
+            return Err(invalid("subscriptions"));
+        }
+        let mut remainder = self.url_template.as_str();
+        let (mut endpoints, mut tickets) = (0, 0);
+        while let Some((_, after_open)) = remainder.split_once('{') {
+            let Some((name, after_close)) = after_open.split_once('}') else {
+                return Err(invalid("url_template"));
+            };
+            match name {
+                "endpoint" => endpoints += 1,
+                "ticket" => tickets += 1,
+                _ => return Err(invalid("url_template")),
+            }
+            remainder = after_close;
+        }
+        // The dial authority must be the validated endpoint's: text before
+        // `{endpoint}` could name another host, so it is refused at install; the
+        // character after it must be `/` or `?` so it cannot extend the authority.
+        // `{ticket}` must sit in the query (after the first `?`): the dialer
+        // splits there, so a ticket elsewhere would be parsed, policy-checked
+        // and stored in unscrubbed memory.
+        if !bounded_text(&self.url_template)
+            || !self
+                .url_template
+                .strip_prefix("{endpoint}")
+                .is_some_and(|rest| rest.starts_with(['/', '?']))
+            || remainder.contains('}')
+            || endpoints != 1
+            || tickets != 1
+            || !self
+                .url_template
+                .split_once('?')
+                .is_some_and(|(_, query)| query.contains("{ticket}"))
+        {
+            return Err(invalid("url_template"));
+        }
+        if self.hosts.is_empty()
+            || self.hosts.len() > MAX_STREAM_HOSTS
+            || self.hosts.iter().any(|host| {
+                !bounded_text(host)
+                    || !host.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'
+                    })
+                    || host.starts_with(['.', '-'])
+                    || host.ends_with(['.', '-'])
+            })
+        {
+            return Err(invalid("hosts"));
+        }
+        let keepalive = &self.keepalive;
+        if keepalive.ping_interval_secs == 0
+            || keepalive.ping_interval_secs > MAX_STREAM_PING_INTERVAL_SECS
+            || keepalive.pong_timeout_secs == 0
+            || keepalive.pong_timeout_secs > MAX_STREAM_PONG_TIMEOUT_SECS
+        {
+            return Err(invalid("keepalive"));
+        }
+        if self.max_frame_bytes == 0 || self.max_frame_bytes > MAX_STREAM_FRAME_BYTES {
+            return Err(invalid("max_frame_bytes"));
+        }
+        if self.max_frames_per_second == 0
+            || self.max_frames_per_second > MAX_STREAM_FRAMES_PER_SECOND
+        {
+            return Err(invalid("max_frames_per_second"));
+        }
+        Ok(())
+    }
 }
 
 /// Webhook ingress methods the generic router accepts.
@@ -848,6 +1150,8 @@ pub enum ChannelDescriptorError {
     InvalidEgressInjection { host: String },
     #[error("egress host `{host}` must be a literal, non-empty host (no wildcards)")]
     WildcardOrEmptyEgressHost { host: String },
+    #[error("egress target `{host}` declares a scheme channel REST egress does not support")]
+    UnsupportedEgressScheme { host: String },
     #[error("egress target `{host}` declares an invalid path or transfer bound")]
     InvalidEgressConstraint { host: String },
     #[error(
@@ -860,6 +1164,12 @@ pub enum ChannelDescriptorError {
     SessionIngressWithRouteSuffix,
     #[error("webhook ingress must declare a route_suffix to mount its receiving route")]
     WebhookIngressWithoutRouteSuffix,
+    #[error(
+        "stream ingress is verified by its connection and must not declare a route_suffix, verification, or body_limit_bytes"
+    )]
+    StreamIngressWithWebhookFields,
+    #[error("stream ingress field `{field}` is missing, malformed, or out of bounds")]
+    InvalidStreamIngress { field: &'static str },
 }
 
 #[cfg(test)]
@@ -887,8 +1197,7 @@ mod tests {
 
         let mut session = channel.clone();
         if let Some(ingress) = session.ingress.as_mut() {
-            ingress.route_suffix = None;
-            ingress.verification = IngressVerificationRecipe::AuthenticatedSession;
+            ingress.transport = ChannelIngressTransport::AuthenticatedSession;
         }
         session
             .validate()
@@ -1106,8 +1415,8 @@ kind = "authenticated_session"
         let channel: ChannelDescriptor =
             toml::from_str(&session_channel_toml(false)).expect("parse session channel");
         let ingress = channel.ingress.as_ref().expect("ingress declared");
-        assert!(ingress.route_suffix.is_none());
-        assert!(ingress.verification.is_authenticated_session());
+        assert!(ingress.route_suffix().is_none());
+        assert!(ingress.is_authenticated_session());
         channel
             .validate()
             .expect("a session channel with no route_suffix is valid");
@@ -1117,11 +1426,15 @@ kind = "authenticated_session"
     fn authenticated_session_ingress_rejects_a_route_suffix() {
         // A session channel is verified upstream (T1) and mounts no webhook
         // route, so declaring one is a contradiction — fail closed.
-        let channel: ChannelDescriptor =
-            toml::from_str(&session_channel_toml(true)).expect("parse session channel");
-        assert_eq!(
-            channel.validate().unwrap_err(),
-            ChannelDescriptorError::SessionIngressWithRouteSuffix,
+        // The transport is a tagged enum, so the contradiction cannot be
+        // represented and fails at parse.
+        let error = toml::from_str::<ChannelDescriptor>(&session_channel_toml(true))
+            .expect_err("a session channel with a route_suffix must not parse");
+        assert!(
+            error
+                .to_string()
+                .contains(&ChannelDescriptorError::SessionIngressWithRouteSuffix.to_string()),
+            "{error}"
         );
     }
 
@@ -1130,19 +1443,13 @@ kind = "authenticated_session"
         // `documented_channel_toml` is a webhook (hmac) ingress; drop its
         // route_suffix and the mount has nowhere to receive.
         let without_suffix = documented_channel_toml().replace("route_suffix = \"events\"\n", "");
-        let channel: ChannelDescriptor =
-            toml::from_str(&without_suffix).expect("parse webhook channel without route_suffix");
+        let error = toml::from_str::<ChannelDescriptor>(&without_suffix)
+            .expect_err("a webhook channel without a route_suffix must not parse");
         assert!(
-            channel
-                .ingress
-                .as_ref()
-                .expect("ingress")
-                .route_suffix
-                .is_none()
-        );
-        assert_eq!(
-            channel.validate().unwrap_err(),
-            ChannelDescriptorError::WebhookIngressWithoutRouteSuffix,
+            error
+                .to_string()
+                .contains(&ChannelDescriptorError::WebhookIngressWithoutRouteSuffix.to_string()),
+            "{error}"
         );
     }
 
@@ -1291,8 +1598,7 @@ kind = "authenticated_session"
         let ingress = channel.ingress.as_ref().unwrap();
         assert_eq!(
             ingress
-                .route_suffix
-                .as_ref()
+                .route_suffix()
                 .expect("webhook ingress declares a route_suffix")
                 .as_str(),
             "events"
@@ -1539,6 +1845,21 @@ kind = "authenticated_session"
         assert_eq!(target.path_prefixes, vec!["/file/bot{token}/"]);
         assert_eq!(target.request_body_limit_bytes, Some(65_536));
         assert_eq!(target.response_body_limit_bytes, Some(5 * 1024 * 1024));
+    }
+
+    /// `NetworkScheme::Wss` is the outbound-WebSocket scheme owned by the
+    /// network boundary. `[[channel.egress]]` declares vendor REST calls, so a
+    /// manifest naming `wss` there is rejected at validation, exactly as
+    /// before the variant existed (it failed to parse), instead of persisting
+    /// and failing at call time.
+    #[test]
+    fn channel_egress_rejects_the_wss_scheme() {
+        let toml = documented_channel_toml().replace("scheme = \"https\"", "scheme = \"wss\"");
+        let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+        assert!(matches!(
+            channel.validate(),
+            Err(ChannelDescriptorError::UnsupportedEgressScheme { .. })
+        ));
     }
 
     /// A prefix without a trailing `/` does not end on a segment boundary, so

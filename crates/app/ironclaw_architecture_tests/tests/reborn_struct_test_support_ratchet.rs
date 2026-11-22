@@ -76,7 +76,11 @@ const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
 // `RebornRuntime` became an ungated production field (shutdown reads it);
 // its accessor stays test-support (integration harnesses wiring their own
 // run-delivery observer are its only callers).
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 268;
+// 268 -> 271 (2026-11-20): the three +1 entries above for stream-ingress
+// Task 10's test-support-only stream connector injection point (same pattern
+// as `with_network_http_egress_for_test`); the total is an equality check, so
+// it records exactly that sum. No new frozen path.
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 271;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -167,13 +171,19 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_composition/src/factory/production_build_assembly.rs",
-        count: 2,
+        // 2 -> 3 (2026-11-20). Stream-ingress Task 10: test-support-only injection point for the stream
+        // WebSocket connector (loopback fake gateway), same pattern as
+        // `with_network_http_egress_for_test`.
+        count: 3,
     },
     FrozenPathCount {
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_composition/src/input.rs",
-        count: 2,
+        // 2 -> 3 (2026-11-20). Stream-ingress Task 10: test-support-only injection point for the stream
+        // WebSocket connector (loopback fake gateway), same pattern as
+        // `with_network_http_egress_for_test`.
+        count: 3,
     },
     FrozenPathCount {
         category: "test-support",
@@ -441,7 +451,10 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_composition/src/input.rs",
-        count: 4,
+        // 4 -> 5 (2026-11-20). Stream-ingress Task 10: test-support-only injection point for the stream
+        // WebSocket connector (loopback fake gateway), same pattern as
+        // `with_network_http_egress_for_test`.
+        count: 5,
     },
     FrozenPathCount {
         category: "test-support",

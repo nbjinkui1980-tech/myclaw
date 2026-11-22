@@ -120,9 +120,16 @@ const CHANNEL_MINT_OWNER: &str = "ironclaw_extension_contracts";
 /// The channel/webhook half of the mint family. Frozen by name: these are the
 /// functions PROPOSAL §6.1.2 assigns to `ironclaw_extension_contracts`, so a
 /// rename or deletion has to come here in the same change.
+///
+/// `mark_authenticated_stream_verified` (2026-11-18, stream-ingress Task 4, ADR
+/// section 3) is the connection-level sibling: same owner, same grant, same
+/// sole sanctioned minter. It adds no implementor and no grant, so
+/// `channel_ingress_verifier_is_implemented_only_by_the_generic_verifier`
+/// still pins exactly one `ChannelIngressVerifier` impl.
 const CHANNEL_MINT_FNS: &[&str] = &[
     "mark_request_signature_verified",
     "mark_shared_secret_header_verified",
+    "mark_authenticated_stream_verified",
 ];
 
 /// The bearer/session half. PROPOSAL §6.1.1 keeps these in `ironclaw_host_api`.
@@ -972,6 +979,42 @@ fn no_crate_re_exports_a_mint_function_it_does_not_own() {
     );
 }
 
+/// The crates allowed to *name* a mint function: the two contracts crates that
+/// define the family and the two sanctioned minters.
+fn permitted_mint_namers() -> BTreeSet<&'static str> {
+    [
+        EVIDENCE_TYPE_OWNER,
+        CHANNEL_MINT_OWNER,
+        HOST_AUTHENTICATOR_CRATE,
+        CHANNEL_VERIFIER_CRATE,
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// For one file owned by `owner`: how many lines name a mint function, and the
+/// lines that do so from a crate not permitted to. The gate and the negative
+/// fixtures below both run this, so a fixture cannot pass against logic the
+/// gate does not use.
+fn mint_name_sightings(owner: &str, source: &str, mint_fns: &[&str]) -> (usize, Vec<String>) {
+    let permitted = permitted_mint_namers();
+    let mut sighted = 0usize;
+    let mut offenders = Vec::new();
+    for raw in strip_comments_and_strings(source).lines() {
+        let line = raw.trim();
+        for name in mint_fns {
+            if !mentions_symbol(line, name) {
+                continue;
+            }
+            sighted += 1;
+            if !permitted.contains(owner) {
+                offenders.push(line.to_string());
+            }
+        }
+    }
+    (sighted, offenders)
+}
+
 /// Closed path #9 — production code outside the two sanctioned minters (and the
 /// two owning contracts crates that define the family) naming a mint function
 /// at all.
@@ -985,33 +1028,18 @@ fn mint_functions_are_named_only_by_their_owners_and_sanctioned_minters() {
     let root = workspace_root();
     let files = collect_workspace_production_rs(&root);
 
-    let permitted: BTreeSet<&str> = [
-        EVIDENCE_TYPE_OWNER,
-        CHANNEL_MINT_OWNER,
-        HOST_AUTHENTICATOR_CRATE,
-        CHANNEL_VERIFIER_CRATE,
-    ]
-    .into_iter()
-    .collect();
-
     let mint_fns = all_mint_fns();
     let mut offenders = Vec::new();
     let mut sighted = 0usize;
     for file in &files {
         let source = read_source(file);
         let owner = owning_crate(&root, file);
-        for raw in strip_comments_and_strings(&source).lines() {
-            let line = raw.trim();
-            for name in &mint_fns {
-                if !mentions_symbol(line, name) {
-                    continue;
-                }
-                sighted += 1;
-                if !permitted.contains(owner.as_str()) {
-                    offenders.push(format!("{}: {line}", render(&root, file)));
-                }
-            }
-        }
+        let (seen, bad) = mint_name_sightings(&owner, &source, &mint_fns);
+        sighted += seen;
+        offenders.extend(
+            bad.into_iter()
+                .map(|line| format!("{}: {line}", render(&root, file))),
+        );
     }
 
     assert!(
@@ -1074,6 +1102,127 @@ fn no_crate_re_exports_the_grant_traits() {
          that uses it — outside what the implementor census can attribute. Import the trait \
          directly where it is implemented. Offenders: {offenders:?}"
     );
+}
+
+/// Negative cases for the stream mint (ADR section 3, Task 4): a channel
+/// package, product code, or composition naming `mark_authenticated_stream_verified`
+/// is an offender, exactly as for the two older channel mints, while the
+/// sanctioned minter and the owning contracts crates are not. Fixture-driven
+/// through [`mint_name_sightings`], the function the gate runs.
+#[test]
+fn the_stream_mint_cannot_be_named_by_packages_or_product_code() {
+    let mint_fns = all_mint_fns();
+    assert!(
+        mint_fns.contains(&"mark_authenticated_stream_verified"),
+        "the stream mint must stay in the governed set"
+    );
+    let calls = [
+        "fn admit() { let e = mark_authenticated_stream_verified(grant, \"connect\", \"x\"); }",
+        "use ironclaw_extension_contracts::verified_inbound::mark_authenticated_stream_verified;",
+        "let e = verified_inbound::mark_authenticated_stream_verified(g, r, s);",
+    ];
+    for owner in [
+        // Channel packages (crates/extensions/packages/*).
+        "ironclaw_slack_extension",
+        "ironclaw_telegram_extension",
+        "ironclaw_dingtalk_extension",
+        // Product code and the composition/app layer.
+        "ironclaw_assistant",
+        "ironclaw_composition",
+        "ironclaw_cli",
+        // A neighbouring extensions-family crate is not the verifier either.
+        "ironclaw_extension_manager",
+    ] {
+        for call in calls {
+            let (sighted, offenders) = mint_name_sightings(owner, call, &mint_fns);
+            assert_eq!(sighted, 1, "{owner}: the scan must see `{call}`");
+            assert_eq!(
+                offenders.len(),
+                1,
+                "{owner} naming the stream mint must be an offender: {call}"
+            );
+        }
+    }
+    for owner in [
+        CHANNEL_VERIFIER_CRATE,
+        CHANNEL_MINT_OWNER,
+        EVIDENCE_TYPE_OWNER,
+    ] {
+        for call in calls {
+            let (sighted, offenders) = mint_name_sightings(owner, call, &mint_fns);
+            assert_eq!(sighted, 1);
+            assert!(
+                offenders.is_empty(),
+                "{owner} is a sanctioned namer: {call}"
+            );
+        }
+    }
+    // Prose and near-miss identifiers must not fire.
+    for benign in [
+        "// mark_authenticated_stream_verified is minted by the host",
+        "fn premark_authenticated_stream_verifiedly() {}",
+    ] {
+        let (sighted, _) = mint_name_sightings("ironclaw_slack_extension", benign, &mint_fns);
+        assert_eq!(sighted, 0, "{benign}");
+    }
+}
+
+/// The same property on the real tree: no production source in a channel
+/// package or in product code names the stream mint or builds the stream
+/// requirement. Packages hold no grant, and product code consumes evidence it
+/// is handed; neither has a reason to spell either name.
+#[test]
+fn no_package_or_product_production_source_names_the_stream_evidence() {
+    let root = workspace_root();
+    let files = collect_test_seam_scan_files(&root);
+    let mut offenders = Vec::new();
+    let mut scanned = 0usize;
+    for file in &files {
+        let rendered = render(&root, file);
+        if !(rendered.starts_with("crates/extensions/packages/")
+            || rendered.starts_with("crates/product/"))
+        {
+            continue;
+        }
+        scanned += 1;
+        let source = read_source(file);
+        for raw in strip_comments_and_strings(&source).lines() {
+            let line = raw.trim();
+            if mentions_symbol(line, "mark_authenticated_stream_verified")
+                || mentions_symbol(line, "AuthenticatedStream")
+            {
+                offenders.push(format!("{rendered}: {line}"));
+            }
+        }
+    }
+    assert!(
+        scanned > 50,
+        "the package/product walk found only {scanned} files — the filter is broken, not the \
+         workspace"
+    );
+    assert!(
+        offenders.is_empty(),
+        "channel packages and product code must not name the stream mint or the \
+         `AuthRequirement::AuthenticatedStream` variant. Stream evidence is minted only by \
+         `{CHANNEL_VERIFIER_CRATE}` after it dials and authenticates the connection itself. \
+         Offenders: {offenders:?}"
+    );
+}
+
+/// A package-side attempt to become a second stream-evidence minter has to
+/// implement the witness trait, and the implementor census must see it.
+#[test]
+fn a_package_stream_supervisor_implementing_the_verifier_is_detected() {
+    for rogue in [
+        "impl ChannelIngressVerifier for StreamSupervisor {}",
+        "use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier as V;\n\
+         impl V for DingTalkStream {}",
+    ] {
+        assert!(
+            file_implements(rogue, "ChannelIngressVerifier"),
+            "census missed a rogue stream-side verifier:\n{rogue}"
+        );
+    }
 }
 
 /// Closed path #10 — the mint family drifting out of the crate PROPOSAL §6

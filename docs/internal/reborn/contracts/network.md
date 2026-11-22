@@ -1,7 +1,7 @@
 # IronClaw Reborn network service contract
 
 **Date:** 2026-04-26
-**Status:** V1 policy + HTTP egress slice
+**Status:** V1 policy + HTTP egress slice; outbound WebSocket slice added 2026-11-18 (stream-ingress ADR §1)
 **Crate:** `crates/substrates/ironclaw_network`
 **Depends on:** `docs/internal/reborn/contracts/host-api.md`
 
@@ -30,6 +30,20 @@ NetworkHttpRequest { scope, method, url, headers, body, policy, response_body_li
   -> NetworkHttpResponse { body, NetworkUsage { request_bytes, response_bytes, resolved_ip } }
 ```
 
+For outbound WebSockets (§4.1) the crate turns a `WebSocketConnectRequest` into a bounded, policy-checked connection:
+
+```text
+WebSocketConnectRequest { scope, url, policy, limits }
+  -> split at the first `?`: the endpoint (scheme, authority, path) continues, the query (the ticket) is held aside; `#` is refused
+  -> wss-only endpoint parse + target normalization (no userinfo), query checked against RFC 3986 query characters
+  -> StaticNetworkPolicyEnforcer over the Wss-scheme, exact-host patterns only
+  -> DNS resolution + private/reserved IP denial
+  -> dial of the vetted addresses only (re-checked per candidate and on the connected peer), rustls (`ring` provider) with native roots
+  -> hand-written HTTP upgrade (RFC 6455 §4.2.2 checks, redirects and unrequested extensions/subprotocols refused) -> WebSocketConnection { sender, receiver } over tokio-tungstenite frames
+```
+**Ticket handling.** The WebSocket URL may carry a connection ticket in its query. The policy, DNS, and URL-parse stages only ever see the endpoint without the query, so no parsed `url::Url` holds the ticket. The ticket first appears in `WebSocketTransportRequest.query` (scrubbed on drop, redacted in `Debug`) and is rendered into one `Zeroizing<Vec<u8>>` of exact capacity (no growth copies) by the upgrade code in `websocket/upgrade.rs`; that buffer is overwritten right after it is written and again on every exit path. `tokio-tungstenite`'s own client handshake is not used because it parses the full URL into an `http::Uri` and renders the request line into plain heap buffers that cannot be scrubbed; it carries frames only. Errors, `Debug` output, and logs never contain the URL or query. **The only copies that this crate cannot scrub** are the plaintext write buffer inside rustls (`tokio-rustls`) while the request is encrypted, and the kernel's socket buffers.
+Tests substitute only the transport: `LoopbackWebSocketTransport` (debug or `test-support` builds) dials a fixed loopback address after the policy, DNS, and private-address checks above have run, and composition accepts a replacement connector only through the test-support `RebornHostBindings::with_stream_connector_for_test`.
+
 This crate does not inject credentials, reserve resources, emit audit/events, make authorization/approval decisions, or own product-surface orchestration. Runtime crates and host-runtime composition call this boundary instead of constructing their own HTTP clients, DNS logic, redirect handling, SSRF checks, or response-limit code.
 
 ---
@@ -51,6 +65,16 @@ NetworkResolver
 NetworkHttpRequest
 NetworkHttpResponse
 NetworkUsage
+WebSocketConnector
+PolicyWebSocketConnector
+WebSocketTransport
+TungsteniteWebSocketTransport
+WebSocketConnectRequest
+WebSocketLimits
+WebSocketConnection / WebSocketSender / WebSocketReceiver
+WebSocketMessage
+WebSocketError
+network_target_for_websocket_url(...)
 network_policy_allows(...)
 target_matches_pattern(...)
 host_matches_pattern(...)
@@ -76,7 +100,8 @@ V1 semantics intentionally mirror the current WASM network import policy checks 
 
 - empty `allowed_targets` fails closed
 - `NetworkTargetPattern.scheme` must match when present
-- `NetworkTargetPattern.port` must match when present; URL-derived targets use the known default port for `http` and `https` when no explicit port is present
+- `NetworkTargetPattern.port` must match when present; URL-derived targets use the known default port for `http`, `https`, and `wss` (80, 443, 443) when no explicit port is present
+- `NetworkScheme::Wss` is the outbound-WebSocket scheme. HTTP egress never authorizes it (`network_target_for_url` and the HTTP egress path reject `wss://`), and the WebSocket connector never authorizes `http`/`https` targets (§4.1)
 - `host_pattern` is exact host or one leading wildcard label such as `*.github.com`
 - wildcard patterns do not match the apex host itself or deeper multi-label subdomains
 - `deny_private_ip_ranges` blocks literal private, loopback, link-local, documentation, broadcast, multicast, unspecified, carrier-grade NAT, IPv4-mapped IPv6 private ranges, and unique-local IP targets
@@ -167,3 +192,4 @@ The crate tests cover:
 - omitted and oversized explicit response body limits clamp to a safe default instead of unbounded reads
 - fail-closed empty policy behavior
 - crate boundary remains low-level and does not depend on workflow/runtime/secret/observability crates
+- WebSocket (`crates/substrates/ironclaw_network/tests/websocket_contract.rs`, loopback fake gateway): connect and exchange text/binary frames through the real policy path; allow-list denial, private/reserved/literal-IP denial, `ws`/`http`/userinfo rejection, wildcard and scheme-agnostic patterns never authorizing, port rules, invalid limits, handshake redirect refusal, handshake rejection (401/403/503 keep their status), forged or over-negotiated upgrade responses (wrong `Sec-WebSocket-Accept`, unrequested extensions), frames sent right behind the upgrade response, the ticket reaching the transport only as the query, fragment and request-line injection refusal, a TLS upgrade against an in-process server, upgrade unit tests over an in-memory duplex (RFC 6455 §4.2.2 checks, header-size and slow-loris limits, byte-at-a-time and split reads, leftover bytes, CRLF injection, request-buffer scrubbing), connect timeout, oversized inbound frame and outbound message, idle timeout, slow-drip frame, graceful close, rate ceiling, keepalive ping, dial-time private re-check, split send-while-receiving, and no URL/query in any error or `Debug` output

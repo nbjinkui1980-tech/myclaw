@@ -125,7 +125,19 @@ pub enum AuthRequirement {
         name: String,
     },
     BearerToken,
+    /// The host dialed the vendor connection itself and authenticated it when
+    /// it was established; frames read from it carry no per-request proof.
+    /// `connection_recipe` is a fixed host-side label for the declared connect
+    /// recipe (see [`MAX_CONNECTION_RECIPE_LABEL_LEN`]). It never carries a
+    /// ticket, URL, connection id, or frame content, and only the generic
+    /// ingress verifier can mint evidence naming this requirement.
+    AuthenticatedStream {
+        connection_recipe: String,
+    },
 }
+
+/// Longest accepted `AuthenticatedStream::connection_recipe` label.
+pub const MAX_CONNECTION_RECIPE_LABEL_LEN: usize = 64;
 
 impl AuthRequirement {
     pub fn validate_metadata(&self) -> Result<(), ProductAdapterError> {
@@ -146,9 +158,40 @@ impl AuthRequirement {
                 validate_cookie_name("auth.name", name)?;
             }
             Self::BearerToken => {}
+            Self::AuthenticatedStream { connection_recipe } => {
+                validate_connection_recipe_label("auth.connection_recipe", connection_recipe)?;
+            }
         }
         Ok(())
     }
+}
+
+/// A recipe label is a short tag: ASCII alphanumerics, `_` and `-` only. That
+/// is narrower than an RFC 7230 token on purpose, so no URL, query string,
+/// ticket, or separator can be recorded in evidence under this name.
+fn validate_connection_recipe_label(
+    field: &'static str,
+    value: &str,
+) -> Result<(), ProductAdapterError> {
+    if value.is_empty() || value.len() > MAX_CONNECTION_RECIPE_LABEL_LEN {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: field,
+            reason: format!(
+                "must be 1 to {MAX_CONNECTION_RECIPE_LABEL_LEN} bytes; got {} bytes",
+                value.len()
+            ),
+        });
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: field,
+            reason: "must contain only ASCII letters, digits, `_` and `-`".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// RFC 7230 §3.2.6 `token` = 1*tchar. Used to syntactically guard HTTP

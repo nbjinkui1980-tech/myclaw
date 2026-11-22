@@ -706,6 +706,8 @@ pub struct RebornRuntime {
     /// reconcile loop lives exactly as long as the runtime.
     _channel_host_assembly:
         Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>>,
+    /// Stream-ingress supervisor; stopped explicitly by [`Self::shutdown`].
+    stream_supervisor: Option<Arc<ironclaw_extension_host::stream_supervisor::StreamSupervisor>>,
     /// The product-side workflow factory that assembly builds every graph
     /// through (§12.11 D-A), held beside it for the same reason: it owns the
     /// per-extension durable state builder and every triggered driver's
@@ -2521,6 +2523,11 @@ impl RebornRuntime {
     /// Awaits both tasks before returning so background state is fully
     /// drained when the runtime drops.
     pub async fn shutdown(self) -> Result<(), RebornRuntimeError> {
+        // Stop stream connections first: no new frame may be admitted while
+        // the rest of the runtime winds down.
+        if let Some(stream_supervisor) = &self.stream_supervisor {
+            stream_supervisor.shutdown().await;
+        }
         if let Some(trigger_poller) = self.trigger_poller_handle {
             trigger_poller
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
@@ -4441,6 +4448,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
             }
         }));
     }
+    let stream_supervisor = started_channel_host
+        .as_ref()
+        .and_then(|started| started.stream_supervisor.clone());
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
     // Forward-migrate pre-removal routines that still carry a stored delivery
@@ -4820,6 +4830,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         channel_egress_credential_bridges: services.channel_egress_credential_bridges.clone(),
         turn_coordinator,
         _channel_host_assembly: channel_host_assembly,
+        stream_supervisor,
         channel_workflow_factory: channel_workflow_factory.clone(),
         _process_gate_query_source: process_gate_query_source,
         turn_tree_store: turn_projection,

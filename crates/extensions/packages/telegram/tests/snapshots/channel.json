@@ -1,0 +1,156 @@
+{
+  "id": "messages",
+  "display_name": "Telegram messages",
+  "conversation_model": "continuous",
+  "commands": [
+    "model",
+    "status",
+    "new",
+    "stop",
+    "interrupt"
+  ],
+  "ingress": {
+    "registration": {
+      "method": "post",
+      "path": "/bot{telegram_bot_token}/setWebhook",
+      "body": {
+        "url": "{telegram_webhook_url}"
+      },
+      "body_credentials": [
+        "telegram_webhook_secret"
+      ]
+    },
+    "deregistration": {
+      "method": "post",
+      "path": "/bot{telegram_bot_token}/deleteWebhook",
+      "body": {}
+    },
+    "activation_calls": [
+      {
+        "method": "post",
+        "path": "/bot{telegram_bot_token}/setMyCommands",
+        "body": {
+          "commands": [
+            {
+              "command": "model",
+              "description": "Show or choose your preferred LLM model"
+            },
+            {
+              "command": "status",
+              "description": "Show what the assistant is doing in this conversation"
+            },
+            {
+              "command": "new",
+              "description": "Start a fresh conversation without deleting the current one"
+            },
+            {
+              "command": "stop",
+              "description": "Stop the active run in this conversation"
+            },
+            {
+              "command": "interrupt",
+              "description": "Interrupt the active run in this conversation"
+            }
+          ]
+        }
+      }
+    ],
+    "deactivation_calls": [
+      {
+        "method": "post",
+        "path": "/bot{telegram_bot_token}/deleteMyCommands",
+        "body": {}
+      }
+    ],
+    "route_suffix": "updates",
+    "method": "post",
+    "body_limit_bytes": 1048576,
+    "verification": {
+      "kind": "shared_secret_header",
+      "secret_handle": "telegram_webhook_secret",
+      "header": "X-Telegram-Bot-Api-Secret-Token"
+    }
+  },
+  "egress": [
+    {
+      "scheme": "https",
+      "host": "api.telegram.org",
+      "methods": [
+        "post"
+      ],
+      "credential_handle": "telegram_bot_token",
+      "injection": {
+        "type": "path_placeholder",
+        "placeholder": "telegram_bot_token"
+      },
+      "body_credentials": [
+        {
+          "handle": "telegram_webhook_secret",
+          "pointer": "/secret_token"
+        }
+      ],
+      "paths": [
+        "/bot{telegram_bot_token}/setWebhook",
+        "/bot{telegram_bot_token}/deleteWebhook",
+        "/bot{telegram_bot_token}/setMyCommands",
+        "/bot{telegram_bot_token}/deleteMyCommands",
+        "/bot{telegram_bot_token}/sendMessage",
+        "/bot{telegram_bot_token}/deleteMessage",
+        "/bot{telegram_bot_token}/setMessageReaction",
+        "/bot{telegram_bot_token}/getFile",
+        "/bot{telegram_bot_token}/sendDocument"
+      ],
+      "request_body_limit_bytes": 5308416,
+      "response_body_limit_bytes": 262144
+    },
+    {
+      "scheme": "https",
+      "host": "api.telegram.org",
+      "methods": [
+        "get"
+      ],
+      "credential_handle": "telegram_bot_token",
+      "injection": {
+        "type": "path_placeholder",
+        "placeholder": "telegram_bot_token"
+      },
+      "path_prefixes": [
+        "/file/bot{telegram_bot_token}/"
+      ],
+      "request_body_limit_bytes": 0,
+      "response_body_limit_bytes": 5242880
+    }
+  ],
+  "presentation": {
+    "supports_markdown": false,
+    "supports_threads": true,
+    "can_reply_in_threads": false
+  },
+  "reply": {
+    "transport": "message"
+  },
+  "delivery": {
+    "transport": "message",
+    "requires_enrollment": false
+  },
+  "connection": {
+    "provider": "telegram",
+    "strategy": "web_generated_code",
+    "instructions": "Open the workspace bot and send the generated code. This pairs your Telegram identity with the bot only; it does not link your personal account or enable personal-account tools.",
+    "input_placeholder": "",
+    "submit_label": "Connect workspace bot",
+    "error_message": "Telegram workspace-bot pairing failed. Generate a new code and try again.",
+    "notices": {
+      "connect_required": "👋 Connect this Telegram account to the workspace bot from the Telegram extension in IronClaw, then message me again.",
+      "paired": "✅ Workspace bot connected. You can talk to IronClaw right here.",
+      "already_paired_same_user": "✅ This Telegram account is already connected to your IronClaw user through the workspace bot.",
+      "already_bound_to_other_user": "This Telegram account is already connected to another IronClaw user.",
+      "expired_or_unknown": "This pairing code is expired or unknown. Generate a new code from the Telegram extension in IronClaw."
+    },
+    "connection_success_message": "The workspace bot is connected. You can chat with IronClaw through the bot without linking your personal Telegram account. Personal-account tools remain unavailable until you separately link your account as a device.",
+    "deep_link_template": "https://t.me/{bot_username}?start={code}",
+    "inbound_code_prefixes": [
+      "/start"
+    ]
+  }
+}

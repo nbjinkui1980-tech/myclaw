@@ -190,7 +190,7 @@ impl ActiveSnapshot {
             }
             if let Some(channel) = &extension.resolved.channel
                 && let Some(ingress) = &channel.ingress
-                && let Some(route_suffix) = &ingress.route_suffix
+                && let Some(route_suffix) = ingress.route_suffix()
             {
                 let suffix = route_suffix.as_str().to_string();
                 if let Some(existing) =
@@ -264,7 +264,7 @@ impl ActiveSnapshot {
         let ingress = channel.ingress.as_ref()?;
         // authenticated_session ingress carries no route_suffix, so it never
         // matches a mounted webhook route — the `?` fails closed here.
-        let declared_suffix = ingress.route_suffix.as_ref()?;
+        let declared_suffix = ingress.route_suffix()?;
         if !channel.supports_inbound() || declared_suffix.as_str() != route_suffix {
             return None;
         }
@@ -297,7 +297,7 @@ impl ActiveSnapshot {
         }
         if let Some(channel) = &candidate.resolved.channel
             && let Some(ingress) = &channel.ingress
-            && let Some(route_suffix) = &ingress.route_suffix
+            && let Some(route_suffix) = ingress.route_suffix()
         {
             let suffix = route_suffix.as_str();
             if let Some(existing) = self.route_owner.get(suffix)

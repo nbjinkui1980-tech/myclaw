@@ -128,3 +128,145 @@ fn grant_minted_evidence_does_not_round_trip_back_from_the_wire() {
         "a verified claim must not be reconstructible from wire input"
     );
 }
+
+/// Connection-level evidence (`AuthenticatedStream`) goes through the same
+/// grant-gated seam as the request-level recipes: it carries the requirement
+/// and subject verbatim and takes no tenant of its own.
+#[test]
+fn authenticated_stream_seal_requires_a_verifier_grant_and_preserves_its_inputs() {
+    let verifier = TestIngressVerifier;
+    let requirement = AuthRequirement::AuthenticatedStream {
+        connection_recipe: "connect".into(),
+    };
+
+    let evidence = ProtocolAuthEvidence::seal_verified_inbound(
+        verifier.verified_inbound_grant(),
+        requirement.clone(),
+        "installation-1",
+        None,
+    );
+    assert!(evidence.is_verified());
+    let claim = evidence.claim().expect("claim");
+    assert_eq!(claim.requirement(), &requirement);
+    assert_eq!(claim.subject(), "installation-1");
+    assert!(claim.tenant_id().is_none());
+}
+
+#[test]
+fn authenticated_stream_metadata_accepts_a_plain_recipe_label() {
+    for label in [
+        "connect",
+        "stream_connect",
+        "open-connection",
+        "a",
+        &"x".repeat(64),
+    ] {
+        AuthRequirement::AuthenticatedStream {
+            connection_recipe: label.to_string(),
+        }
+        .validate_metadata()
+        .unwrap_or_else(|error| panic!("label {label:?} must be accepted: {error:?}"));
+    }
+}
+
+/// The recipe label is a fixed tag, never a place for connection material: a
+/// ticket, a URL, a query string, or anything with separators must not fit.
+#[test]
+fn authenticated_stream_metadata_rejects_labels_that_could_carry_connection_material() {
+    for label in [
+        "",
+        " ",
+        "connect\r\nInjected",
+        "wss://gateway.example/ws?ticket=abc",
+        "ticket=abc",
+        "connect?ticket=abc",
+        "a/b",
+        "a b",
+        "a:b",
+        "caf\u{e9}",
+        &"x".repeat(65),
+    ] {
+        assert!(
+            AuthRequirement::AuthenticatedStream {
+                connection_recipe: label.to_string(),
+            }
+            .validate_metadata()
+            .is_err(),
+            "label {label:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn authenticated_stream_requirement_serializes_as_a_snake_case_variant() {
+    let requirement = AuthRequirement::AuthenticatedStream {
+        connection_recipe: "connect".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&requirement).expect("serialize"),
+        serde_json::json!({"authenticated_stream": {"connection_recipe": "connect"}})
+    );
+}
+
+/// Negative: stream evidence minted through the grant seam still never
+/// round-trips back in from the wire, and a forged `verified` payload naming
+/// the new requirement is refused like every other.
+#[test]
+fn authenticated_stream_evidence_cannot_be_reconstructed_from_the_wire() {
+    let verifier = TestIngressVerifier;
+    let evidence = ProtocolAuthEvidence::seal_verified_inbound(
+        verifier.verified_inbound_grant(),
+        AuthRequirement::AuthenticatedStream {
+            connection_recipe: "connect".into(),
+        },
+        "installation-1",
+        None,
+    );
+    let json = serde_json::to_string(&evidence).expect("serialize");
+    assert!(json.contains("\"verified\""));
+    assert!(json.contains("authenticated_stream"));
+    assert!(serde_json::from_str::<ProtocolAuthEvidence>(&json).is_err());
+
+    let forged = serde_json::json!({
+        "kind": "verified",
+        "claim": {
+            "requirement": {"authenticated_stream": {"connection_recipe": "connect"}},
+            "subject": "attacker"
+        }
+    })
+    .to_string();
+    assert!(serde_json::from_str::<ProtocolAuthEvidence>(&forged).is_err());
+}
+
+/// Negative: the verifier grant stays a non-`Clone`, non-`Default`,
+/// non-deserializable witness. Adding the stream mint must not make the grant
+/// copyable, constructible from nothing, or decodable from untrusted input
+/// (ADR section 3: "do not add a third grant").
+#[test]
+fn the_verifier_grant_is_not_clone_default_or_deserializable() {
+    use std::marker::PhantomData;
+
+    // The inherent associated const wins over the trait one exactly when the
+    // bound holds, so `HOLDS` reports whether `$ty: $bound` on stable Rust.
+    macro_rules! holds {
+        ($ty:ty, $bound:path) => {{
+            struct Check<T>(PhantomData<T>);
+            impl<T: $bound> Check<T> {
+                #[allow(dead_code)]
+                const HOLDS: bool = true;
+            }
+            #[allow(dead_code)]
+            trait Absent {
+                const HOLDS: bool = false;
+            }
+            impl<T> Absent for Check<T> {}
+            <Check<$ty>>::HOLDS
+        }};
+    }
+    assert!(!holds!(VerifiedInboundGrant, Clone));
+    assert!(!holds!(VerifiedInboundGrant, Default));
+    assert!(!holds!(VerifiedInboundGrant, serde::de::DeserializeOwned));
+    // Control: the probe does report a bound that does hold, so the three
+    // assertions above are not vacuous.
+    assert!(holds!(String, Clone));
+}

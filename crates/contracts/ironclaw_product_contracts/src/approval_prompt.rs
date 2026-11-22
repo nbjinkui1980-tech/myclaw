@@ -173,6 +173,7 @@ fn network_destination(
     let scheme = match scheme {
         NetworkScheme::Http => "http",
         NetworkScheme::Https => "https",
+        NetworkScheme::Wss => "wss",
     };
     let authority = match port {
         Some(port) => format!("{host}:{port}"),
@@ -205,5 +206,24 @@ fn non_empty_string(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_destination_labels_every_scheme_including_wss() {
+        for (scheme, expected) in [
+            (NetworkScheme::Http, "GET http://host.example:80"),
+            (NetworkScheme::Https, "GET https://host.example:80"),
+            (NetworkScheme::Wss, "GET wss://host.example:80"),
+        ] {
+            let destination =
+                network_destination(&NetworkMethod::Get, scheme, "host.example", Some(80))
+                    .expect("destination view");
+            assert_eq!(destination.label, expected);
+        }
     }
 }

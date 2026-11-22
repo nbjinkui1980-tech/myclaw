@@ -86,6 +86,14 @@ and admission test: [`../AGENTS.md`](../AGENTS.md).
   `authorized::AuthorizationGrant`: the field is private to this crate, so the
   provided trait body is the sole source and an override cannot construct one.
   Keep them non-`Clone`/non-`Default`/non-`Deserialize`.
+- `AuthRequirement::AuthenticatedStream { connection_recipe }` is
+  connection-level evidence for stream ingress (ADR
+  `docs/internal/2026-11-18-dingtalk-stream-adr.md` section 3). It is minted
+  only through the same `VerifiedInboundGrant` by `ironclaw_extension_host`,
+  after the host dialed and authenticated the connection itself. The label is
+  a fixed host tag (ASCII letters, digits, `_`, `-`, at most 64 bytes), never a
+  ticket, URL, or frame field; the subject is the installation that owns the
+  connection. Product-adapter manifests cannot declare it.
 - A **test** that needs verified evidence uses
   `ProtocolAuthEvidence::test_verified` (the `test-support` seam); a test
   double that must hold a grant goes under `tests/` — never an inline

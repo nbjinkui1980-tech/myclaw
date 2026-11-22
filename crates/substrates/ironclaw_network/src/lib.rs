@@ -16,6 +16,7 @@ mod test_rewrite;
 mod transport;
 mod types;
 mod url_target;
+mod websocket;
 
 pub use egress::{NetworkHttpEgress, NetworkHttpTransport, PolicyNetworkHttpEgress};
 pub use error::NetworkHttpError;
@@ -36,5 +37,13 @@ pub use types::{
 };
 pub use url_target::{
     NetworkTargetUrlError, is_path_segment_credential_material, is_rfc3986_unreserved_segment,
-    network_target_for_url, percent_decode_url_component_lossy,
+    network_target_for_url, network_target_for_websocket_url, percent_decode_url_component_lossy,
+};
+#[cfg(any(debug_assertions, feature = "test-support"))]
+pub use websocket::LoopbackWebSocketTransport;
+pub use websocket::{
+    MAX_FRAME_BYTES_CEILING, MAX_MESSAGE_BYTES_CEILING, MAX_MESSAGES_PER_SECOND_CEILING,
+    PolicyWebSocketConnector, TungsteniteWebSocketTransport, WebSocketConnectRequest,
+    WebSocketConnection, WebSocketConnector, WebSocketError, WebSocketLimits, WebSocketMessage,
+    WebSocketReceiver, WebSocketSender, WebSocketTransport, WebSocketTransportRequest,
 };

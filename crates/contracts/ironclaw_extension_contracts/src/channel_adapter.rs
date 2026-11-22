@@ -68,6 +68,35 @@ pub trait ChannelIngress: Send + Sync {
     ) -> Result<InboundOutcome, ChannelError>;
 }
 
+/// **Stream control** — the pure frame protocol of a declared
+/// `[channel.ingress.stream]`. Pairs with [`ChannelIngress`]: the host reads
+/// frames off its own connection, asks this trait what each means, and
+/// hands the `data` of a delivered frame to [`ChannelIngress::receive`].
+///
+/// No I/O, no secrets, no evidence: when to acknowledge, reconnect, or drop
+/// is host policy applied to the decision returned here.
+pub trait ChannelStreamControl: Send + Sync {
+    fn decode(&self, frame: &[u8]) -> Result<StreamFrameDecision, ChannelError>;
+    /// A bounded key that only orders delivery: frames sharing a key are
+    /// admitted in arrival order. It confers no identity or authority.
+    fn session_key(&self, _data: &[u8]) -> Option<String> {
+        None
+    }
+}
+/// What one inbound stream frame asks the host to do. `ack` bytes are sent
+/// to the vendor by the host, at the moment host policy decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamFrameDecision {
+    /// A protocol frame answered at once; nothing to deliver.
+    Ack(Vec<u8>),
+    /// Answer, then drop the connection and reconnect.
+    AckAndReconnect(Vec<u8>),
+    /// A vendor event: `data` goes to `receive`, `ack` is sent only after the
+    /// host has durably admitted it.
+    Deliver { data: Vec<u8>, ack: Vec<u8> },
+    /// Ignore the frame, optionally answering it.
+    Drop { ack: Option<Vec<u8>> },
+}
 /// **Delivery** — reaching someone out of band, target-resolved. Pairs with
 /// `[channel.delivery]`. Source-routed system notices (a connect nudge, a
 /// busy hint, a working indicator on a one-shot channel) also ride this half
@@ -148,9 +177,18 @@ pub struct ChannelSurfaces {
     // arch-exempt: optional_arc, a channel binds only the halves its manifest declares and activation checks the set (`check_channel_halves`), plan #8007
     pub reply: Option<Arc<dyn ReplySink>>,
     pub delivery: Option<Arc<dyn ChannelDelivery>>,
+    /// The frame protocol half a declared `[channel.ingress.stream]` requires
+    /// next to `ingress`.
+    // arch-exempt: optional_arc, bound only for stream ingress and checked at activation (`check_channel_halves`), plan #8007
+    pub stream_control: Option<Arc<dyn ChannelStreamControl>>,
 }
 
 impl ChannelSurfaces {
+    pub fn with_stream_control(mut self, control: Arc<dyn ChannelStreamControl>) -> Self {
+        self.stream_control = Some(control);
+        self
+    }
+
     pub fn with_ingress(mut self, ingress: Arc<dyn ChannelIngress>) -> Self {
         self.ingress = Some(ingress);
         self

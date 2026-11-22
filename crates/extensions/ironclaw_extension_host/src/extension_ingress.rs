@@ -84,7 +84,20 @@ pub enum VerifiedEvidenceMint {
     SharedSecretHeader {
         header: String,
     },
+    /// The host dialed the vendor connection itself and authenticated it when
+    /// it was established (stream ingress). Minted only for frames read from
+    /// that connection, with the installation that owns the connection as
+    /// subject; nothing inside a frame selects either.
+    AuthenticatedStream {
+        connection_recipe: String,
+    },
 }
+
+/// Fixed label recorded as `AuthRequirement::AuthenticatedStream`'s
+/// `connection_recipe`: it names the declared `[channel.ingress.stream.connect]`
+/// recipe, the one connect call a stream declaration has. A constant, so no
+/// manifest value, ticket, or frame content can reach the evidence.
+pub const STREAM_CONNECTION_RECIPE_LABEL: &str = "connect";
 
 /// This crate is the generic ingress verifier — trust stage T2 — so it holds the
 /// one production `ChannelIngressVerifier` implementation in the workspace, and
@@ -114,6 +127,13 @@ impl VerifiedEvidenceMint {
                 verified_inbound::mark_shared_secret_header_verified(
                     self.verified_inbound_grant(),
                     header.clone(),
+                    subject,
+                )
+            }
+            Self::AuthenticatedStream { connection_recipe } => {
+                verified_inbound::mark_authenticated_stream_verified(
+                    self.verified_inbound_grant(),
+                    connection_recipe.clone(),
                     subject,
                 )
             }
@@ -943,6 +963,29 @@ mod tests {
     use super::*;
     use crate::channel_pairing::ChannelPairingConsumeOutcome;
 
+    /// ADR 3: the stream mint attests connection-level authentication, names
+    /// the host's fixed recipe label, and takes its subject from the
+    /// installation that owns the connection.
+    #[test]
+    fn authenticated_stream_mint_attests_the_connection_for_its_installation() {
+        let mint = VerifiedEvidenceMint::AuthenticatedStream {
+            connection_recipe: STREAM_CONNECTION_RECIPE_LABEL.to_string(),
+        };
+        let evidence = mint.mint("installation-1");
+        let claim = evidence.claim().expect("verified claim");
+        assert_eq!(
+            claim.requirement(),
+            &ironclaw_host_api::product_adapter::AuthRequirement::AuthenticatedStream {
+                connection_recipe: STREAM_CONNECTION_RECIPE_LABEL.to_string(),
+            }
+        );
+        assert_eq!(claim.subject(), "installation-1");
+        assert!(claim.tenant_id().is_none());
+        claim
+            .requirement()
+            .validate_metadata()
+            .expect("the fixed label satisfies the requirement's own metadata rules");
+    }
     struct CountingSurface {
         submissions: AtomicUsize,
         inline_attachments:

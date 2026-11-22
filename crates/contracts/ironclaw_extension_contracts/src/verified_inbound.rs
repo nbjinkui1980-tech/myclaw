@@ -34,7 +34,9 @@
 //! consumer's opt-in compiled the family open workspace-wide. See
 //! `crates/contracts/ironclaw_host_api/src/product_adapter/auth.rs` for the measurement.
 //!
-//! ✎ **WS8, 2026-08-05:** the family is two functions, not four. The
+//! ✎ **WS8, 2026-08-05:** the family is two functions, not four (stream-ingress
+//! Task 4 later added `mark_authenticated_stream_verified`, the connection-level
+//! sibling, behind the same grant). The
 //! `_for_tenant` variants of both recipes had zero callers in any build and
 //! were deleted as dead mint surface; the ingress router mints unscoped
 //! evidence and resolves tenancy from the installation afterwards. Tenant
@@ -85,6 +87,29 @@ pub fn mark_shared_secret_header_verified(
         grant,
         AuthRequirement::SharedSecretHeader {
             header_name: header_name.into(),
+        },
+        subject,
+        None,
+    )
+}
+
+/// Attest that the host dialed this vendor connection itself and that the
+/// connection was authenticated when it was established.
+///
+/// Connection-level, not request-level: it is minted only for frames read from
+/// a connection the host opened for the installation named by `subject`, never
+/// for an identity read out of a frame. `connection_recipe` is the host's fixed
+/// label for the declared connect recipe; it must never carry a ticket, URL, or
+/// connection id (`AuthRequirement::validate_metadata` bounds it).
+pub fn mark_authenticated_stream_verified(
+    grant: VerifiedInboundGrant,
+    connection_recipe: impl Into<String>,
+    subject: impl Into<String>,
+) -> ProtocolAuthEvidence {
+    ProtocolAuthEvidence::seal_verified_inbound(
+        grant,
+        AuthRequirement::AuthenticatedStream {
+            connection_recipe: connection_recipe.into(),
         },
         subject,
         None,

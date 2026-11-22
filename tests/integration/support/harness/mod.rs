@@ -783,6 +783,7 @@ impl HostRuntimeCapabilityHarness {
             skill_activation_user,
             outbound_target_service,
             network_http_egress_for_test,
+            stream_connector_for_test,
             activate_bundled_extensions_for_test,
             project_service_fault_injection,
             durable_capability_io,
@@ -904,6 +905,9 @@ impl HostRuntimeCapabilityHarness {
         }
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
+        }
+        if let Some(connector) = stream_connector_for_test {
+            input = input.with_stream_connector_for_test(connector);
         }
         if google_oauth_backend_for_test {
             // Dummy but well-formed: only presence on `oauth_provider_configs`

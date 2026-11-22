@@ -2186,6 +2186,8 @@ fn extension_info(id: &str, active: bool) -> RebornExtensionInfo {
             LifecyclePublicState::SetupNeeded
         },
         activation_error: None,
+        stream_connection: None,
+        stream_summary: None,
         version: Some("1.0.0".to_string()),
         onboarding: None,
         auth_accounts: Vec::new(),

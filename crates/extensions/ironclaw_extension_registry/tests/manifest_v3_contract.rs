@@ -31,6 +31,8 @@ use ironclaw_host_api::{
 const ACME_MANIFEST: &str =
     include_str!("../../../../tests/fixtures/extensions/acme-messenger/manifest.toml");
 
+const ACME_STREAM_MANIFEST: &str =
+    include_str!("../../../../tests/fixtures/extensions/acme-messenger-stream/manifest.toml");
 fn contracts() -> HostApiContractRegistry {
     let mut registry = HostApiContractRegistry::new();
     registry
@@ -148,8 +150,7 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
     let ingress = channel.ingress.as_ref().expect("ingress declared");
     assert_eq!(
         ingress
-            .route_suffix
-            .as_ref()
+            .route_suffix()
             .expect("webhook ingress declares a route_suffix")
             .as_str(),
         "events"
@@ -1777,4 +1778,63 @@ fn legacy_resolved_record_without_standard_op_rehydrates_to_none() {
         .expect("a descriptor without a standard_op key must still deserialize");
     assert_eq!(rehydrated_descriptor.standard_op, None);
     assert_eq!(rehydrated_descriptor.id, descriptor.id);
+}
+
+// ---------------------------------------------------------------------------
+// Stream ingress (stream-ingress Task 3)
+// ---------------------------------------------------------------------------
+#[test]
+fn acme_stream_fixture_parses_with_a_stable_digest() {
+    let first = parse_v3(ACME_STREAM_MANIFEST).expect("acme stream fixture must parse");
+    let second = parse_v3(ACME_STREAM_MANIFEST).expect("acme stream fixture must parse again");
+    let resolved = first.resolved();
+    let channel = resolved.channel.as_ref().expect("channel declared");
+    let ingress = channel.ingress.as_ref().expect("ingress declared");
+    let stream = ingress.stream().expect("stream transport declared");
+    assert!(ingress.route_suffix().is_none());
+    assert!(ingress.webhook_verification().is_none());
+    assert_eq!(stream.hosts, ["gateway.acme.example"]);
+    assert_eq!(stream.response.ticket, "/ticket");
+    // The resolved record (what the digest and persistence cover) is stable
+    // across parses and round-trips through its stored JSON form.
+    let json = serde_json::to_string(resolved).expect("resolved serializes");
+    assert_eq!(
+        json,
+        serde_json::to_string(second.resolved()).expect("resolved serializes")
+    );
+    let stored: ironclaw_extension_registry::ResolvedExtensionManifest =
+        serde_json::from_str(&json).expect("resolved deserializes");
+    assert_eq!(&stored, resolved);
+    // Pinned: editing the fixture is a reviewed change to every stream test.
+    assert_eq!(
+        ironclaw_host_api::approval::sha256_digest_token(ACME_STREAM_MANIFEST.as_bytes()),
+        "sha256:09aebd9a01034791556b6b056dc92a7b53ab1d3ab761f856a5e18dbcbaf8539a"
+    );
+}
+#[test]
+fn stream_ingress_connect_credential_must_be_a_declared_secret_field() {
+    let undeclared = ACME_STREAM_MANIFEST.replace(
+        "body_credentials = [\"acme_client_secret\"]",
+        "body_credentials = [\"acme_unlisted_secret\"]",
+    );
+    let error = parse_v3(&undeclared).expect_err("an undeclared connect credential must fail");
+    assert!(error.contains("acme_unlisted_secret"), "{error}");
+    let not_secret = ACME_STREAM_MANIFEST.replace(
+        "{ handle = \"acme_client_secret\", label = \"Client secret\", secret = true, required = true }",
+        "{ handle = \"acme_client_secret\", label = \"Client secret\", secret = false, required = true }",
+    );
+    assert!(
+        parse_v3(&not_secret).is_err(),
+        "a non-secret field cannot back a body credential"
+    );
+}
+#[test]
+fn stream_ingress_rejects_webhook_fields_and_wildcard_hosts() {
+    let mixed = ACME_STREAM_MANIFEST.replace(
+        "[channel.ingress.stream]\n",
+        "[channel.ingress]\nroute_suffix = \"events\"\n[channel.ingress.stream]\n",
+    );
+    assert!(parse_v3(&mixed).is_err());
+    let wildcard = ACME_STREAM_MANIFEST.replace("gateway.acme.example", "*.acme.example");
+    assert!(parse_v3(&wildcard).is_err());
 }

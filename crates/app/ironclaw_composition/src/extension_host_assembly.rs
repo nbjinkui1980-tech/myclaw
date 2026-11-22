@@ -535,6 +535,11 @@ pub(crate) fn channel_admin_users(
 pub(crate) struct StartedChannelHost {
     pub(crate) assembly: Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>,
     pub(crate) workflow_factory: Arc<ironclaw_assistant::RebornChannelWorkflowFactory>,
+    /// The stream-ingress supervisor, when the runtime composed the generic
+    /// ingress. Held so its reconcile loop and connections live exactly as long
+    /// as the runtime.
+    pub(crate) stream_supervisor:
+        Option<Arc<ironclaw_extension_host::stream_supervisor::StreamSupervisor>>,
 }
 
 pub(crate) fn start_channel_host(
@@ -654,6 +659,7 @@ pub(crate) fn start_channel_host(
     StartedChannelHost {
         assembly,
         workflow_factory,
+        stream_supervisor: None,
     }
 }
 
@@ -695,7 +701,7 @@ pub(crate) async fn build_runtime_channel_host(
         operator_user_id: actor_user_id,
     };
     let admin_users = channel_admin_users(services, &identity);
-    let started = start_channel_host(
+    let mut started = start_channel_host(
         &source,
         ChannelHostAssemblyWiring {
             thread_service,
@@ -715,6 +721,34 @@ pub(crate) async fn build_runtime_channel_host(
             start_reply_publication: services.start_reply_publication_at_build,
         },
     );
+    // Stream-ingress supervision: one connection per active installation whose
+    // channel declares `[channel.ingress.stream]`, admitting through the same
+    // shared pipeline the webhook router uses. Composition only assembles it.
+    if let Some(ingress) = services.extension_ingress.as_ref() {
+        started.stream_supervisor = Some(
+            ironclaw_extension_host::stream_supervisor::StreamSupervisor::start(
+                ironclaw_extension_host::stream_supervisor::StreamSupervisorDeps {
+                    watch: source.generic_host.snapshot_watch(),
+                    deployment_channels: Arc::clone(&source.deployment_channels),
+                    admission: ingress.router.stream_admission(),
+                    connector: Arc::clone(&services.stream_connector),
+                    scope: services.stream_scope.clone(),
+                    audit: Arc::new(
+                        ironclaw_extension_host::stream_supervisor::FanoutStreamAudit::new(vec![
+                            Arc::new(
+                                ironclaw_extension_host::stream_supervisor::TracingStreamAudit,
+                            ),
+                            Arc::clone(&services.stream_statuses)
+                                as Arc<
+                                    dyn ironclaw_extension_host::stream_supervisor::StreamAuditSink,
+                                >,
+                        ]),
+                    ),
+                },
+                ironclaw_extension_host::stream_supervisor::StreamSupervisorConfig::default(),
+            ),
+        );
+    }
     let assembly = Arc::clone(&started.assembly);
 
     for binding in &services.channel_extension_bindings {

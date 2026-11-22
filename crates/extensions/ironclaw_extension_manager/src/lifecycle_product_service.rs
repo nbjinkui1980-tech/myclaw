@@ -610,6 +610,24 @@ impl LifecycleProductService for ExtensionHostLifecycleProductService {
         };
         result.map_err(lifecycle_surface_error)
     }
+
+    /// Connection state of active stream-ingress extensions, read from the
+    /// host's in-memory cache through the same management port.
+    async fn installed_stream_connections(
+        &self,
+        _context: LifecycleProductContext,
+    ) -> Result<
+        std::collections::HashMap<
+            ExtensionId,
+            ironclaw_product_contracts::lifecycle_service::ExtensionStreamConnection,
+        >,
+        ProductSurfaceError,
+    > {
+        Ok(match &self.extension_management {
+            Some(extension_management) => extension_management.installation_stream_connections(),
+            None => std::collections::HashMap::new(),
+        })
+    }
 }
 
 fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductOperationFailure> {

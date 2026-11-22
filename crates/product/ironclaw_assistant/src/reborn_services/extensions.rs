@@ -1,5 +1,6 @@
 use ironclaw_product_contracts::lifecycle_service::{
-    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+    ExtensionStreamConnection, ExtensionStreamState, LifecycleProductContext,
+    LifecycleProductService, LifecycleProductSurfaceContext,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -85,7 +86,10 @@ pub(super) async fn list_extensions(
         .await?;
     // Redacted per-extension activation errors from the durable installation
     // records, projected onto `RebornExtensionInfo::activation_error`.
-    let activation_errors = service.installed_activation_errors(context).await?;
+    let activation_errors = service.installed_activation_errors(context.clone()).await?;
+    // Host-held connection state of active stream-ingress channels, projected
+    // onto `RebornExtensionInfo::stream_connection`.
+    let stream_connections = service.installed_stream_connections(context).await?;
     Ok(RebornExtensionListResponse {
         extensions: lifecycle_extension_infos(
             installed,
@@ -94,6 +98,7 @@ pub(super) async fn list_extensions(
             connections,
             account_states,
             activation_errors,
+            stream_connections,
         )
         .await?,
     })
@@ -203,6 +208,7 @@ async fn lifecycle_extension_infos(
     connections: HashMap<ExtensionId, bool>,
     account_states: HashMap<ExtensionId, ChannelAuthAccountState>,
     activation_errors: HashMap<ExtensionId, String>,
+    stream_connections: HashMap<ExtensionId, ExtensionStreamConnection>,
 ) -> Result<Vec<RebornExtensionInfo>, ProductSurfaceError> {
     let resolved = stream::iter(installed)
         .map(|installed| {
@@ -232,6 +238,7 @@ async fn lifecycle_extension_infos(
                 &connections,
                 &account_states,
                 &activation_errors,
+                &stream_connections,
             )
         })
         .collect())
@@ -454,6 +461,7 @@ fn extension_info(
     connections: &HashMap<ExtensionId, bool>,
     account_states: &HashMap<ExtensionId, ChannelAuthAccountState>,
     activation_errors: &HashMap<ExtensionId, String>,
+    stream_connections: &HashMap<ExtensionId, ExtensionStreamConnection>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
     let CallerChannelConnection {
@@ -482,6 +490,10 @@ fn extension_info(
     let activation_error = extension_id
         .as_ref()
         .and_then(|id| activation_errors.get(id).cloned());
+    let stream_connection = extension_id
+        .as_ref()
+        .and_then(|id| stream_connections.get(id).cloned());
+    let stream_summary = stream_connection.as_ref().map(stream_summary);
     let auth_accounts = vendor_auth_accounts(&summary, projected_account, missing_recipe_scopes);
     let resolved_account_id = auth_accounts
         .first()
@@ -501,12 +513,38 @@ fn extension_info(
             activation_error.is_some(),
         ),
         activation_error,
+        stream_connection,
+        stream_summary,
         version: Some(summary.version),
         onboarding: onboarding.onboarding,
         auth_accounts,
         surfaces,
         install_scope,
     }
+}
+
+/// Redacted one-line rendering of a stream connection for the extension card.
+/// Built only from the typed state and a fixed reason code, so no endpoint,
+/// ticket, credential, or vendor text can appear. The single-instance notice
+/// is always present: the vendor's multi-connection delivery is unverified
+/// (ADR 9), so a second instance on the same credentials may take messages.
+fn stream_summary(connection: &ExtensionStreamConnection) -> String {
+    let state = match connection.state {
+        ExtensionStreamState::Connecting => "Connecting to the vendor stream.",
+        ExtensionStreamState::Connected => "Connected to the vendor stream.",
+        ExtensionStreamState::Reconnecting => "Disconnected from the vendor stream; reconnecting.",
+        ExtensionStreamState::NeedsAdministrator => {
+            "Stopped reconnecting: an administrator must check the channel credentials or limits."
+        }
+    };
+    let reason = connection
+        .last_error
+        .as_deref()
+        .map(|code| format!(" Last error: {code}."))
+        .unwrap_or_default();
+    format!(
+        "{state}{reason} Run only one IronClaw instance per application credential; a second instance (or environment) using the same credentials can take messages."
+    )
 }
 
 /// Wire surfaces for a lifecycle summary: tool/auth pass through; the
@@ -1568,6 +1606,128 @@ mod tests {
         ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             panic!("list_extensions should execute the list action, not project one package")
         }
+    }
+
+    /// `ListingService` plus the host's connection state for stream channels.
+    struct StreamListingService {
+        inner: ListingService,
+        connections: HashMap<ExtensionId, ExtensionStreamConnection>,
+    }
+
+    #[async_trait]
+    impl LifecycleProductService for StreamListingService {
+        async fn execute(
+            &self,
+            context: LifecycleProductContext,
+            action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            self.inner.execute(context, action).await
+        }
+
+        async fn project_package(
+            &self,
+            context: LifecycleProductContext,
+            package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            self.inner.project_package(context, package_ref).await
+        }
+
+        async fn installed_stream_connections(
+            &self,
+            _context: LifecycleProductContext,
+        ) -> Result<HashMap<ExtensionId, ExtensionStreamConnection>, ProductSurfaceError> {
+            Ok(self.connections.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn list_projects_the_hosts_stream_connection_state_redacted() {
+        let mut summary = summary_with_onboarding();
+        summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
+        summary.credential_requirements = Vec::new();
+        let inner = ListingService {
+            extension: LifecycleInstalledExtensionSummary {
+                summary,
+                phase: InstallationState::Active,
+                install_scope: None,
+            },
+        };
+        let connection = |state, error: Option<&str>| {
+            HashMap::from([(
+                ExtensionId::new("fixture").expect("extension id"),
+                ExtensionStreamConnection {
+                    state,
+                    last_error: error.map(str::to_string),
+                    last_error_at: None,
+                },
+            )])
+        };
+
+        for (state, error, expected_phrase) in [
+            (ExtensionStreamState::Connecting, None, "Connecting"),
+            (ExtensionStreamState::Connected, None, "Connected"),
+            (
+                ExtensionStreamState::Reconnecting,
+                Some("connect_unavailable"),
+                "reconnecting",
+            ),
+            (
+                ExtensionStreamState::NeedsAdministrator,
+                Some("connect_unauthorized"),
+                "administrator",
+            ),
+        ] {
+            let response = list_extensions(
+                Arc::new(StreamListingService {
+                    inner: ListingService {
+                        extension: inner.extension.clone(),
+                    },
+                    connections: connection(state, error),
+                }),
+                None,
+                no_channel_connections(),
+                None,
+                caller(),
+            )
+            .await
+            .expect("list extensions");
+            let extension = response.extensions.first().expect("one extension");
+            let projected = extension.stream_connection.as_ref().expect("stream state");
+            assert_eq!(projected.state, state);
+            assert_eq!(projected.last_error.as_deref(), error);
+            let summary = extension.stream_summary.as_deref().expect("summary");
+            assert!(summary.contains(expected_phrase), "{summary}");
+            assert!(
+                summary.contains("only one IronClaw instance"),
+                "the single-replica notice is always shown: {summary}"
+            );
+            if let Some(code) = error {
+                assert!(summary.contains(code), "{summary}");
+            }
+            // Nothing that could carry a secret or an endpoint is on the wire.
+            let wire = serde_json::to_string(extension).expect("serializes");
+            for forbidden in ["ticket", "secret", "wss://", "token", "?"] {
+                assert!(!wire.contains(forbidden), "{forbidden} leaked into {wire}");
+            }
+        }
+
+        // No state reported for the extension: the fields stay absent.
+        let none = list_extensions(
+            Arc::new(StreamListingService {
+                inner,
+                connections: HashMap::new(),
+            }),
+            None,
+            no_channel_connections(),
+            None,
+            caller(),
+        )
+        .await
+        .expect("list extensions");
+        let wire = serde_json::to_value(none.extensions.first().expect("one")).expect("json");
+        assert!(wire.get("stream_connection").is_none());
+        assert!(wire.get("stream_summary").is_none());
     }
 
     struct MultiListingService {

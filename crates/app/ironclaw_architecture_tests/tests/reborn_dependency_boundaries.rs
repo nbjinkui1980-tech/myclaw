@@ -866,7 +866,21 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the cap's inline test (~63 lines). Declaration and shape
         // validation only; execution stays in ironclaw_extension_host's
         // lifecycle.
-        ("ironclaw_extension_contracts", 13_026),
+        // 13_026 -> 13_510 (2026-11-18, stream-ingress Task 3, DingTalk Stream
+        // ADR 2.1/2.2/2.3): the measured tree was 13_103 before this change
+        // (13_510 after, +407 lines; the pin sat 77 above the old count). The
+        // growth is declaration vocabulary and its shape validation only:
+        // `ChannelIngressTransport` (webhook / stream / authenticated_session)
+        // with the flat backward-compatible wire decoder and encoder (~130),
+        // `ChannelStreamDescriptor` and its bounds validation (~200), the pure
+        // `ChannelStreamControl` trait + `StreamFrameDecision` and the
+        // `ChannelSurfaces.stream_control` slot (~38), and the stream half of
+        // the exported conformance suite (~100). The frame protocol reuses
+        // `ChannelIngress::receive` (ADR 2.4) so no second inbound path or
+        // fixture family is added; supervision, I/O, and evidence minting stay
+        // in ironclaw_extension_host. The new unit tests live in `tests/`, not
+        // `src/`. Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 13_510),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -1131,7 +1145,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // typed notification records, pagination, and lifecycle command DTOs.
         // Storage and lifecycle behavior live in ironclaw_notifications;
         // this crate only owns the authenticated ProductSurface wire contract.
-        ("ironclaw_product_contracts", 16_581),
+        // 16_581 -> 16_736 (stream-ingress Task 9, reviewed re-pin): +155 lines.
+        // `ExtensionStreamState` / `ExtensionStreamConnection` (typed,
+        // secret-free connection state with fixed reason codes) and the
+        // default-empty `LifecycleProductService::installed_stream_connections`
+        // port method. Declarations only; the cache lives in
+        // ironclaw_extension_host and the wording in ironclaw_assistant.
+        ("ironclaw_product_contracts", 16_736),
         // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.
@@ -4626,6 +4646,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_host_runtime",
                 "ironclaw_loop_host",
                 "ironclaw_mcp",
+                // The stream declaration and frame-control trait are pure
+                // vocabulary; dialing the connection is the network crate's
+                // and the extension host supervisor's job, never this crate's.
+                "ironclaw_network",
                 "ironclaw_assistant",
                 "ironclaw_composition",
                 "ironclaw_sandbox",

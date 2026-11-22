@@ -456,6 +456,14 @@ pub fn registering_channel_manifest() -> ResolvedExtensionManifest {
     resolve(REGISTERING_CHANNEL_MANIFEST)
 }
 
+/// The shared acme stream-ingress fixture manifest
+/// (`tests/fixtures/extensions/acme-messenger-stream`), resolved.
+pub fn stream_channel_manifest() -> ResolvedExtensionManifest {
+    resolve(include_str!(
+        "../../../../tests/fixtures/extensions/acme-messenger-stream/manifest.toml"
+    ))
+}
+
 /// A channel-only resolved manifest.
 pub fn channel_only_manifest() -> ResolvedExtensionManifest {
     resolve(CHANNEL_MANIFEST)
@@ -618,7 +626,25 @@ impl ironclaw_extension_contracts::reply::ReplySink for FakeChannelAdapter {
     }
 }
 
+impl ironclaw_extension_contracts::channel_adapter::ChannelStreamControl for FakeChannelAdapter {
+    fn decode(
+        &self,
+        _frame: &[u8],
+    ) -> Result<ironclaw_extension_contracts::channel_adapter::StreamFrameDecision, ChannelError>
+    {
+        Ok(ironclaw_extension_contracts::channel_adapter::StreamFrameDecision::Drop { ack: None })
+    }
+}
 impl FakeChannelAdapter {
+    /// What a stream-ingress manifest with a message reply requires: ingress,
+    /// frame control, and a reply sink.
+    pub fn stream_halves() -> ChannelSurfaces {
+        let adapter = Arc::new(Self::default());
+        ChannelSurfaces::default()
+            .with_ingress(adapter.clone())
+            .with_stream_control(adapter.clone())
+            .with_reply(adapter)
+    }
     /// Every half bound — matches the fixture manifests that declare a
     /// webhook ingress, a message reply, and a delivery section.
     pub fn all_halves() -> ChannelSurfaces {
