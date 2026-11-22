@@ -184,6 +184,10 @@ pub struct RebornHostBindings {
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
+    /// Test-support only: replaces the production rustls WebSocket connector
+    /// stream-ingress channels dial through (a loopback fake gateway).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) stream_connector_for_test: Option<Arc<dyn ironclaw_network::WebSocketConnector>>,
     /// Test-support only: stamp filesystem-discovered extension packages as
     /// `HostBundled` so integration fixtures that model host-bundled
     /// extensions (the §8 invented-vendor fixture) may assert
@@ -904,6 +908,18 @@ impl RebornHostBindings {
         self
     }
 
+    /// Replace the WebSocket connector stream-ingress channels dial through
+    /// (the production rustls transport) with a test double such as a
+    /// loopback `PolicyWebSocketConnector`. Test-support only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_stream_connector_for_test(
+        mut self,
+        connector: Arc<dyn ironclaw_network::WebSocketConnector>,
+    ) -> Self {
+        self.stream_connector_for_test = Some(connector);
+        self
+    }
+
     /// Trust filesystem-discovered fixture extensions as host-bundled
     /// (first-party-eligible). Test-support only; see the field doc.
     #[cfg(any(test, feature = "test-support"))]
@@ -996,6 +1012,8 @@ impl RebornHostBindings {
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
+            #[cfg(any(test, feature = "test-support"))]
+            stream_connector_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
             trust_fixture_extensions_for_test: false,
             product_auth_ports: None,

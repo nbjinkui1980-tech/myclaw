@@ -1,0 +1,135 @@
+{
+  "id": "messages",
+  "display_name": "Slack messages",
+  "conversation_model": "continuous",
+  "commands": [
+    "model",
+    "status",
+    "new",
+    "stop",
+    "interrupt"
+  ],
+  "ingress": {
+    "route_suffix": "events",
+    "method": "post",
+    "body_limit_bytes": 1048576,
+    "verification": {
+      "kind": "hmac_sha256",
+      "secret_handle": "slack_signing_secret",
+      "signature_header": "X-Slack-Signature",
+      "signature_prefix": "v0=",
+      "signature_encoding": "hex",
+      "timestamp_header": "X-Slack-Request-Timestamp",
+      "max_age_seconds": 300,
+      "signed_payload": [
+        {
+          "literal": "v0:"
+        },
+        {
+          "header": "X-Slack-Request-Timestamp"
+        },
+        {
+          "literal": ":"
+        },
+        {
+          "body": true
+        }
+      ]
+    }
+  },
+  "egress": [
+    {
+      "scheme": "https",
+      "host": "slack.com",
+      "methods": [
+        "post"
+      ],
+      "credential_handle": "slack_bot_token",
+      "paths": [
+        "/api/chat.postMessage",
+        "/api/chat.postEphemeral",
+        "/api/chat.delete",
+        "/api/conversations.open",
+        "/api/files.completeUploadExternal",
+        "/api/reactions.add",
+        "/api/reactions.remove",
+        "/api/chat.startStream",
+        "/api/chat.appendStream",
+        "/api/chat.stopStream",
+        "/api/agents.sessions.setStatus"
+      ],
+      "request_body_limit_bytes": 262144,
+      "response_body_limit_bytes": 262144
+    },
+    {
+      "scheme": "https",
+      "host": "slack.com",
+      "methods": [
+        "get"
+      ],
+      "credential_handle": "slack_bot_token",
+      "paths": [
+        "/api/files.info",
+        "/api/files.getUploadURLExternal",
+        "/api/conversations.history",
+        "/api/conversations.replies"
+      ],
+      "request_body_limit_bytes": 0,
+      "response_body_limit_bytes": 262144
+    },
+    {
+      "scheme": "https",
+      "host": "files.slack.com",
+      "methods": [
+        "get"
+      ],
+      "credential_handle": "slack_bot_token",
+      "path_prefixes": [
+        "/files-pri/"
+      ],
+      "request_body_limit_bytes": 0,
+      "response_body_limit_bytes": 5242880
+    },
+    {
+      "scheme": "https",
+      "host": "files.slack.com",
+      "methods": [
+        "post"
+      ],
+      "path_prefixes": [
+        "/upload/"
+      ],
+      "request_body_limit_bytes": 5242880,
+      "response_body_limit_bytes": 262144
+    }
+  ],
+  "presentation": {
+    "supports_markdown": true,
+    "supports_threads": true,
+    "can_reply_in_threads": true,
+    "command_prefix": "/ironclaw "
+  },
+  "reply": {
+    "transport": "stream"
+  },
+  "delivery": {
+    "transport": "message",
+    "requires_enrollment": false
+  },
+  "connection": {
+    "provider": "slack",
+    "strategy": "oauth",
+    "instructions": "Connect your Slack account with OAuth from the Slack extension configuration. The workspace bot is configured once by an administrator; this connection authorizes only your personal Slack tools and identity.",
+    "input_placeholder": "",
+    "submit_label": "Connect Slack",
+    "error_message": "Slack OAuth connection failed. Try connecting Slack again.",
+    "notices": {
+      "connect_required": "👋 Connect your Slack account in the IronClaw web app, then message me here again.",
+      "paired": "✅ Slack is connected. You can talk to IronClaw here.",
+      "already_paired_same_user": "✅ This Slack account is already connected to you.",
+      "already_bound_to_other_user": "This Slack account is already connected to another IronClaw user.",
+      "expired_or_unknown": "That Slack connection is invalid or expired. Start a fresh OAuth connection from IronClaw."
+    },
+    "connection_success_message": "Slack is installed and connected for this user. Slack tools use the user's OAuth account, while inbound and outbound channel messages use the administrator-configured workspace bot."
+  }
+}

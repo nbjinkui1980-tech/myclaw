@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use crate::channel::ReplyTransport;
 use crate::channel_adapter::{
     ChannelSurfaces, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
-    VerifiedInbound,
+    StreamFrameDecision, VerifiedInbound,
 };
 use crate::reply::{
     ReplyAnswerText, ReplyAttachmentRef, ReplyAudience, ReplyContextBytes, ReplyDisplayText,
@@ -133,6 +133,106 @@ impl RestrictedEgress for ScriptedVendorServer {
     }
 }
 
+/// Fixture for the stream-ingress half of the contract.
+pub struct StreamControlConformance {
+    /// Must bind both `ingress` and `stream_control`.
+    pub surfaces: ChannelSurfaces,
+    pub extension_id: String,
+    pub installation_id: String,
+    pub config: Vec<(String, String)>,
+    /// A vendor event frame: must decode to `Deliver`, and its `data` must
+    /// normalize through `ChannelIngress::receive` to `Messages`.
+    pub event_frame: Vec<u8>,
+    /// A vendor frame that asks the client to reconnect, when the protocol
+    /// has one: must decode to `AckAndReconnect`.
+    pub reconnect_frame: Option<Vec<u8>>,
+    pub vendor_responses:
+        Arc<dyn Fn(&RestrictedEgressRequest) -> RestrictedEgressResponse + Send + Sync>,
+}
+/// Run the stream-ingress conformance contract: a delivered frame becomes
+/// valid messages through `receive`, the control half stays pure on hostile
+/// bytes, and ordering keys stay bounded.
+pub async fn run_stream_control_conformance(conformance: StreamControlConformance) {
+    let StreamControlConformance {
+        surfaces,
+        extension_id,
+        installation_id,
+        config,
+        event_frame,
+        reconnect_frame,
+        vendor_responses,
+    } = conformance;
+    let (Some(ingress), Some(control)) =
+        (surfaces.ingress.as_ref(), surfaces.stream_control.as_ref())
+    else {
+        panic!("conformance: a stream channel must bind both ingress and frame control");
+    };
+    let server = ScriptedVendorServer::new(vendor_responses);
+    let decision = conformance_value(
+        control.decode(&event_frame),
+        "conformance: the event frame fixture must decode",
+    );
+    let StreamFrameDecision::Deliver { data, ack } = decision else {
+        panic!("conformance: the event frame must decode to Deliver");
+    };
+    if ack.is_empty() {
+        panic!("conformance: a delivered frame must carry the ack to send after admission");
+    }
+    if let Some(key) = control.session_key(&data)
+        && (key.is_empty() || key.len() > 256)
+    {
+        panic!("conformance: a session key must be non-empty and at most 256 bytes");
+    }
+    let outcome = conformance_value(
+        ingress
+            .receive(
+                VerifiedInbound {
+                    extension_id: &extension_id,
+                    installation_id: &installation_id,
+                    config: &config,
+                    body: &data,
+                    headers: &[],
+                    can_reply_in_threads: true,
+                },
+                &server,
+            )
+            .await,
+        "conformance: delivered frame data must parse through receive",
+    );
+    let InboundOutcome::Messages(messages) = outcome else {
+        panic!("conformance: delivered frame data must normalize to Messages");
+    };
+    for message in &messages {
+        conformance_value(
+            message.validate(),
+            "conformance: messages from a delivered frame must satisfy host bounds",
+        );
+    }
+    if let Some(frame) = reconnect_frame {
+        let decision = conformance_value(
+            control.decode(&frame),
+            "conformance: the reconnect frame fixture must decode",
+        );
+        if !matches!(decision, StreamFrameDecision::AckAndReconnect(_)) {
+            panic!("conformance: the reconnect frame must decode to AckAndReconnect");
+        }
+    }
+    // Hostile bytes never panic; a hostile `Deliver` still has bounded keys.
+    for garbage in [
+        &b""[..],
+        &b"{"[..],
+        &b"\xff\xfe\x00garbage"[..],
+        &b"[]"[..],
+        &b"{\"unexpected\":true}"[..],
+    ] {
+        if let Ok(StreamFrameDecision::Deliver { data, .. }) = control.decode(garbage)
+            && let Some(key) = control.session_key(&data)
+            && key.len() > 256
+        {
+            panic!("conformance: a session key from hostile bytes must stay bounded");
+        }
+    }
+}
 /// Run the full conformance contract. Panics with a labeled assertion on
 /// the first violation (this is a test-support entry point).
 pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConformance) {

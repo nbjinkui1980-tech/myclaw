@@ -151,6 +151,9 @@ pub struct ExtensionLifecycleManager {
     // the dispatch chain resolves extensions from the host's active snapshot;
     // unattached compositions (focused tests) keep registry-only dispatch.
     generic_host: std::sync::OnceLock<Arc<crate::ExtensionHost>>,
+    /// Connection state of stream-ingress channels, fed by the stream
+    /// supervisor's audit events. Absent when no supervisor is composed.
+    stream_statuses: std::sync::OnceLock<Arc<crate::stream_supervisor::StreamConnectionStatuses>>,
     /// Late-bound weak reference to the effective channel-configuration
     /// resolver. Weak ownership avoids the cycle created by that resolver's
     /// reactivation port pointing back to this lifecycle service.
@@ -355,6 +358,7 @@ impl ExtensionLifecycleManager {
             hosted_mcp_preparation,
             credential_cleanup,
             generic_host: std::sync::OnceLock::new(),
+            stream_statuses: std::sync::OnceLock::new(),
             channel_config: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             registry_install_operations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -384,6 +388,64 @@ impl ExtensionLifecycleManager {
         let _ = self.generic_host.set(host);
     }
 
+    /// Attach the stream supervisor's connection-state cache so the lifecycle
+    /// projection can report it.
+    pub fn attach_stream_statuses(
+        &self,
+        statuses: Arc<crate::stream_supervisor::StreamConnectionStatuses>,
+    ) {
+        let _ = self.stream_statuses.set(statuses);
+    }
+    /// Connection state for every ACTIVE stream-ingress extension. An active
+    /// stream extension with no event yet reports `Connecting`; inactive
+    /// extensions are absent. Empty without an attached host or cache.
+    pub fn installation_stream_connections(
+        &self,
+    ) -> std::collections::HashMap<
+        ExtensionId,
+        ironclaw_product_contracts::lifecycle_service::ExtensionStreamConnection,
+    > {
+        use crate::stream_supervisor::StreamConnectionState as Host;
+        use ironclaw_product_contracts::lifecycle_service::{
+            ExtensionStreamConnection, ExtensionStreamState as Wire,
+        };
+        let (Some(host), Some(statuses)) = (self.generic_host.get(), self.stream_statuses.get())
+        else {
+            return std::collections::HashMap::new();
+        };
+        let snapshot = host.snapshot_watch().current();
+        snapshot
+            .extension_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let active = snapshot.extension(&id)?;
+                active
+                    .resolved
+                    .channel
+                    .as_ref()?
+                    .ingress
+                    .as_ref()?
+                    .stream()?;
+                let view = match statuses.get(&id) {
+                    None => ExtensionStreamConnection {
+                        state: Wire::Connecting,
+                        last_error: None,
+                        last_error_at: None,
+                    },
+                    Some(status) => ExtensionStreamConnection {
+                        state: match status.state {
+                            Host::Connected => Wire::Connected,
+                            Host::Reconnecting => Wire::Reconnecting,
+                            Host::NeedsAdministrator => Wire::NeedsAdministrator,
+                        },
+                        last_error: status.last_error.map(str::to_string),
+                        last_error_at: status.last_error_at,
+                    },
+                };
+                Some((ExtensionId::new(&id).ok()?, view))
+            })
+            .collect()
+    }
     pub fn attach_channel_config(&self, channel_config: &Arc<crate::ChannelConfigService>) {
         let _ = self.channel_config.set(Arc::downgrade(channel_config));
     }
@@ -4936,6 +4998,132 @@ output_schema_ref = "schemas/run.output.json"
             ))
             .expect("register capability provider contract");
         contracts
+    }
+
+    /// The projection reads the supervisor's in-memory cache for ACTIVE stream
+    /// extensions only: `Connecting` before any event, the cache's state after,
+    /// nothing once deactivated, and nothing without an attached cache.
+    #[tokio::test]
+    async fn stream_connections_project_active_stream_extensions_from_the_attached_cache() {
+        use crate::stream_supervisor::{
+            StreamAuditEvent, StreamAuditKind, StreamAuditSink, StreamConnectionStatuses,
+        };
+        use crate::test_support::{FakeChannelAdapter, FakeLoader, stream_channel_manifest};
+        use ironclaw_product_contracts::lifecycle_service::ExtensionStreamState;
+
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let owner = UserId::new("alice").expect("valid user");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem: Arc::clone(&filesystem),
+            catalog: AvailableExtensionCatalog::from_packages(vec![]),
+            installation_store: installation_store.clone(),
+            lifecycle_service: Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            active_extensions: ActiveExtensionPublisher::new(
+                Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new())),
+                Arc::new(
+                    HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                        .expect("trust policy"),
+                ),
+                Arc::new(InvalidationBus::new()),
+            ),
+            credential_cleanup: None,
+            tenant_operator_user_id: owner,
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let host = Arc::new(
+            crate::ExtensionHost::new(crate::ExtensionHostDeps {
+                store: Arc::new(crate::RehydratedInstallationRecordStore::default()),
+                loader: Arc::new(FakeLoader {
+                    bindings: crate::ExtensionBindings {
+                        tools: None,
+                        channel: FakeChannelAdapter::stream_halves(),
+                        device_link: None,
+                    },
+                    load_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    fail_load: false,
+                }),
+                drain: Arc::new(crate::test_support::RecordingDrain::default()),
+                egress: Arc::new(crate::test_support::FakeEgressFactory),
+                reserved_capability_ids: Default::default(),
+                reserved_ingress_routes: Default::default(),
+                hook_deadline: std::time::Duration::from_secs(5),
+                linked_sessions: crate::LinkedSessionStore::unavailable(),
+                linked_accounts: Arc::new(crate::UnavailableLinkedAccountResolution),
+                admin_secrets: None,
+            })
+            .await,
+        );
+        manager.attach_generic_host(Arc::clone(&host));
+        let id = ExtensionId::new("acme-messenger-stream").expect("extension id");
+
+        // No cache attached: nothing is reported.
+        assert!(manager.installation_stream_connections().is_empty());
+        let statuses = Arc::new(StreamConnectionStatuses::default());
+        manager.attach_stream_statuses(Arc::clone(&statuses));
+        assert!(
+            manager.installation_stream_connections().is_empty(),
+            "an installed but inactive extension has no connection"
+        );
+
+        host.install(crate::InstallationRecord {
+            extension_id: id.as_str().to_string(),
+            installation_id: "stream-install".to_string(),
+            state: ironclaw_extension_contracts::state::InstallationState::Installed,
+            resolved: Arc::new(stream_channel_manifest()),
+            config: Vec::new(),
+            last_error: None,
+        })
+        .await
+        .expect("install");
+        host.activate(id.as_str()).await.expect("activate");
+
+        let connecting = manager.installation_stream_connections();
+        assert_eq!(
+            connecting.get(&id).map(|c| c.state),
+            Some(ExtensionStreamState::Connecting)
+        );
+
+        statuses.record(StreamAuditEvent {
+            extension_id: id.as_str().to_string(),
+            installation_id: "stream-install".to_string(),
+            host: Some("gateway.acme.example".to_string()),
+            kind: StreamAuditKind::NeedsAdministrator {
+                reason: "connect_unauthorized",
+            },
+        });
+        let flagged = manager.installation_stream_connections();
+        let view = flagged.get(&id).expect("projected");
+        assert_eq!(view.state, ExtensionStreamState::NeedsAdministrator);
+        assert_eq!(view.last_error.as_deref(), Some("connect_unauthorized"));
+        let wire = serde_json::to_string(view).expect("serializes");
+        assert!(
+            !wire.contains("gateway.acme.example") && !wire.contains("wss"),
+            "no endpoint on the projection: {wire}"
+        );
+
+        host.deactivate(id.as_str()).await.expect("deactivate");
+        assert!(
+            manager.installation_stream_connections().is_empty(),
+            "a deactivated extension has no connection"
+        );
     }
 
     fn fixture_extension_package() -> AvailableExtensionPackage {

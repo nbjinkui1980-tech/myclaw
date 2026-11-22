@@ -19,9 +19,11 @@
 //! [`IngressRequest`]/[`IngressResponse`] values and composition wraps it in
 //! the host HTTP server's route mount.
 
+mod admission;
 mod router;
 mod verifier;
 
+pub use admission::{AdmissionDisposition, StreamAdmission, StreamFrameInput};
 pub use router::{
     ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundAdmission, InboundAdmissionAck,
     InboundSink, InboundSinkError, IngressConfigurationPort, IngressPortError,

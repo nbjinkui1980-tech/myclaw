@@ -920,6 +920,7 @@ pub struct NetworkTarget {
 pub enum NetworkScheme {
     Http,
     Https,
+    Wss, // outbound WebSocket over TLS; only the ironclaw_network WebSocket connector authorizes it
 }
 
 #[serde(rename_all = "snake_case")]
@@ -1298,6 +1299,10 @@ Avoid public tuple fields for any type where invalid strings would break authori
 
 
 ---
+
+## Addendum: connection-level protocol-auth evidence (2026-11-18)
+
+`product_adapter::auth::AuthRequirement` gains `AuthenticatedStream { connection_recipe }` (wire name `authenticated_stream`) for stream ingress, where authentication happens once when the host dials the vendor connection rather than on each request. It is sealed exactly like the other channel evidence: the only constructor path is `ProtocolAuthEvidence::seal_verified_inbound`, which consumes a `VerifiedInboundGrant`, and `ironclaw_extension_host` holds the only `ChannelIngressVerifier`. No grant or implementor is added. `connection_recipe` is a fixed host label (ASCII letters, digits, `_`, `-`; 1 to 64 bytes) and never carries a ticket, URL, connection id, or frame content. The evidence subject is the installation that owns the connection. Product-adapter manifests cannot declare this requirement. Decision record: `docs/internal/2026-11-18-dingtalk-stream-adr.md` section 3.
 
 ## Contract freeze addendum — global scope model (2026-04-25)
 

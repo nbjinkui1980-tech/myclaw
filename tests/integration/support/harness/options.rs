@@ -62,6 +62,11 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// set this to stay hermetic. `None` for every harness that surfaces no
     /// such capability.
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
+    /// Replaces the production WebSocket connector stream-ingress channels dial
+    /// through (`RebornHostBindings::with_stream_connector_for_test`): a
+    /// loopback connector over a fake gateway, so the composed runtime's real
+    /// stream supervisor connects without reaching a network.
+    pub(crate) stream_connector_for_test: Option<Arc<dyn ironclaw_network::WebSocketConnector>>,
     /// C-JOURNEY: bundled first-party WASM packages (e.g. github) to publish
     /// directly into the local-dev active-extension registry at construction
     /// time, via `RebornServices::publish_bundled_extension_for_test`
@@ -167,6 +172,7 @@ impl HostRuntimeHarnessOptions {
             skill_activation_user: None,
             outbound_target_service: None,
             network_http_egress_for_test: None,
+            stream_connector_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
             fixture_extension_dirs: Vec::new(),
             native_extension_factories: Vec::new(),
@@ -284,6 +290,14 @@ impl HostRuntimeHarnessOptions {
         egress: Arc<dyn NetworkHttpEgress>,
     ) -> Self {
         self.network_http_egress_for_test = Some(egress);
+        self
+    }
+
+    pub(crate) fn with_stream_connector_for_test(
+        mut self,
+        connector: Arc<dyn ironclaw_network::WebSocketConnector>,
+    ) -> Self {
+        self.stream_connector_for_test = Some(connector);
         self
     }
 

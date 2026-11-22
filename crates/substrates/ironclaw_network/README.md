@@ -3,14 +3,15 @@
 The network policy boundary and hardened outbound transport: target/method
 policy evaluation, DNS resolution with private-address denial, redirect and
 response-size hardening, and the pinned `reqwest` transport. It is the
-workspace's sole egress-policy owner and its only sanctioned `reqwest`/TLS
-home — a module elsewhere would put that cone in the build graph of every
+workspace's sole egress-policy owner, its only sanctioned `reqwest`/TLS home,
+and its only sanctioned WebSocket client (`tokio-tungstenite`, on the same
+rustls + native-roots trust) — a module elsewhere would put that cone in the build graph of every
 crate that needed even the policy types.
 
 - **Family / layer:** `substrates` / `substrates` · **Package:**
   `ironclaw_network` · **Manifest:**
   `crates/substrates/ironclaw_network/Cargo.toml`
-- **Use this when:** an outbound HTTP call must exist — it gets policy-checked,
+- **Use this when:** an outbound HTTP call or WebSocket must exist — it gets policy-checked,
   resolved with private-IP denial, and sent through the hardened transport.
 - **Don't use this when:** you need credentials attached → injection is the
   kernel's obligation handling (`ironclaw_host_runtime`), never done here;
@@ -27,9 +28,23 @@ crate that needed even the policy types.
 - Resolution: `NetworkResolver` (`resolver`) — denies private and reserved
   addresses before a connection opens.
 - Transport: `ReqwestNetworkTransport` (`transport`).
+- WebSocket: `WebSocketConnector` port + `PolicyWebSocketConnector`,
+  `WebSocketTransport` + `TungsteniteWebSocketTransport`, `WebSocketConnection`
+  (split into `WebSocketSender` / `WebSocketReceiver`), `WebSocketLimits`,
+  `WebSocketError` (`websocket`). `wss` only, exact allow-listed Wss hosts,
+  private-address denial at resolve and dial time, no redirects, bounded
+  frames/idle/rate, no URL or query in any error. The upgrade handshake is
+  hand-written (`websocket/upgrade.rs`) so the connection ticket lives only in
+  `Zeroizing` buffers: policy and DNS see the endpoint without the query, and the
+  only copies not scrubbed are rustls's internal plaintext write buffer and the
+  kernel's socket buffers. Contract:
+  `docs/internal/reborn/contracts/network.md` §4.1.
 - Types: `NetworkRequest`, `NetworkHttpRequest`/`NetworkHttpResponse`,
   `NetworkUsage`, `DEFAULT_RESPONSE_BODY_LIMIT` (`types`); `NetworkHttpError`
   (`error`).
+- Test seam: `LoopbackWebSocketTransport` — dials one
+  loopback address over plaintext `ws` for fake-gateway tests; compiled only
+  under `debug_assertions` or `test-support`, constructor-only (no env switch).
 - Test seam: `RewriteNetworkTransport` (`test_rewrite`) — env-gated,
   loopback-only host rewriting for E2E harnesses, compiled only under
   `debug_assertions` or the `test-support` feature; a release build refuses to
@@ -38,7 +53,7 @@ crate that needed even the policy types.
 ## Depends on / consumed by
 
 - **Depends on (workspace):** `ironclaw_host_api` only. External: `reqwest`
-  (sole owner), `url`, `percent-encoding`, `zeroize`, `tokio`, `thiserror`,
+  (sole owner), `tokio-tungstenite` (sole owner; frame layer), `rustls`/`tokio-rustls`/`rustls-native-certs`/`rustls-pki-types` (WebSocket TLS, same `ring` provider and native roots as `reqwest`), `httparse` and `subtle` (upgrade-response checks), `futures-util`, `url`, `percent-encoding`, `zeroize`, `tokio`, `thiserror`,
   `tracing`.
 - **Consumed by (measured 2026-08-05):** 5 normal — `ironclaw_host_runtime`
   (the production caller), `ironclaw_composition` (constructs),
@@ -62,6 +77,9 @@ crate that needed even the policy types.
   `reborn_dependency_boundaries.rs` (`reborn_crate_dependency_boundaries_hold`)
   forbids runtime/workflow/secret/filesystem/resource/event/approval/
   authorization crates by name.
+- **One WebSocket client:** `reborn_websocket_single_network_boundary` fails
+  any other crate that depends on, or names in production `src/`, a WebSocket
+  client library, and pins WebSocket TLS to `reqwest`'s native-roots trust.
 - **Runtime crates cannot bypass it:**
   `reborn_runtime_http_egress_has_single_network_boundary` scans the lane and
   kernel `src/` trees for `reqwest::Client`, ad-hoc DNS, and revived SSRF

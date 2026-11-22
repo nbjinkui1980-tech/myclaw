@@ -8,7 +8,8 @@
 //! `ironclaw_host_api/tests/authorized_seal.rs`.
 
 use ironclaw_extension_contracts::verified_inbound::{
-    mark_request_signature_verified, mark_shared_secret_header_verified,
+    mark_authenticated_stream_verified, mark_request_signature_verified,
+    mark_shared_secret_header_verified,
 };
 use ironclaw_host_api::product_adapter::auth::{
     AuthRequirement, ChannelIngressVerifier, ProtocolAuthEvidence,
@@ -82,4 +83,39 @@ fn minted_evidence_does_not_round_trip_back_from_the_wire() {
         parsed.is_err(),
         "a verified claim must not be reconstructible from wire input"
     );
+}
+
+#[test]
+fn authenticated_stream_evidence_carries_the_connection_recipe_and_installation() {
+    let verifier = TestIngressVerifier;
+    let evidence = mark_authenticated_stream_verified(
+        verifier.verified_inbound_grant(),
+        "connect",
+        "installation-1",
+    );
+
+    assert!(evidence.is_verified());
+    let claim = evidence.claim().expect("claim");
+    assert_eq!(
+        claim.requirement(),
+        &AuthRequirement::AuthenticatedStream {
+            connection_recipe: "connect".to_string(),
+        }
+    );
+    assert_eq!(claim.subject(), "installation-1");
+    assert!(claim.tenant_id().is_none());
+}
+
+#[test]
+fn authenticated_stream_evidence_does_not_round_trip_back_from_the_wire() {
+    let verifier = TestIngressVerifier;
+    let evidence = mark_authenticated_stream_verified(
+        verifier.verified_inbound_grant(),
+        "connect",
+        "installation-1",
+    );
+    let json = serde_json::to_string(&evidence).expect("serialize");
+    assert!(json.contains("\"verified\""));
+    assert!(!json.contains("seal"));
+    assert!(serde_json::from_str::<ProtocolAuthEvidence>(&json).is_err());
 }

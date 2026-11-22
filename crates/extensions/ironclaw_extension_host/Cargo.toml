@@ -85,6 +85,7 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 toml = "1.1"
 tracing = "0.1"
 url = "2"
+zeroize = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
@@ -106,6 +107,10 @@ ironclaw_resources = { path = "../../kernel/ironclaw_resources", features = ["te
 ironclaw_slack_extension = { path = "../packages/slack" }
 http-body-util = "0.1"
 tempfile = "3"
+# Hosts the loopback fake gateway in stream-supervisor contract tests. A dev
+# dependency only: `reborn_websocket_single_network_boundary` bans it as a
+# production dependency outside `ironclaw_network`.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 # Installs a level-appropriate subscriber so a `tracing` body actually runs
@@ -123,6 +128,14 @@ required-features = ["test-support"]
 
 [[test]]
 name = "ingress_router_contract"
+required-features = ["test-support"]
+
+[[test]]
+name = "stream_supervisor_contract"
+required-features = ["test-support"]
+
+[[test]]
+name = "stream_lifecycle_contract"
 required-features = ["test-support"]
 
 [[test]]

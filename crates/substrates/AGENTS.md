@@ -24,7 +24,7 @@ in `crates/kernel/` before the call arrives.
 | [`ironclaw_filesystem`](./ironclaw_filesystem) | Storage fabric: `RootFilesystem` trait, `ScopedFilesystem` mount enforcement, mount catalog, CAS floor, disk/libSQL/Postgres/in-memory backends | Bytes or records need a durable home behind the one trait |
 | [`ironclaw_documents`](./ironclaw_documents) | Bounded, structure-preserving OOXML transforms and deterministic HTML-subset PDF rendering | Document bytes need addressable reads or typed, loss-averse transforms without filesystem authority |
 | [`ironclaw_libsql_runtime`](./ironclaw_libsql_runtime) | libSQL connection admission: one bounded read pool + exactly one writer lane per database | You need a libSQL connection — this is the only legal source |
-| [`ironclaw_network`](./ironclaw_network) | Egress policy and hardened outbound transport; the workspace's only `reqwest` owner | An outbound HTTP call must be policy-checked before it exists |
+| [`ironclaw_network`](./ironclaw_network) | Egress policy and hardened outbound transport (HTTP and WebSocket); the workspace's only `reqwest` and WebSocket-client owner | An outbound HTTP call or WebSocket must be policy-checked before it exists |
 | [`ironclaw_observability`](./ironclaw_observability) | Zero-cost-when-off latency-trace macros; exactly one dependency (`tracing`) | You want to time an operation without adopting a tracing stack |
 | [`ironclaw_safety`](./ironclaw_safety) | Injection detection, input validation, leak scanning, credential detection, display redaction | Untrusted text needs scanning or redaction at a trust boundary |
 | [`ironclaw_secrets`](./ironclaw_secrets) | Encrypted secret custody, one-shot leases, credential broker | Secret material needs storing, leasing, or brokering |

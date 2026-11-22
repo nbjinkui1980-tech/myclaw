@@ -28,6 +28,16 @@ Grouped by responsibility (all modules are `pub`; see `src/lib.rs`):
   verification recipe (HMAC / shared-secret) identically for every vendor and
   mints the sealed verified-inbound evidence everything downstream trusts.
   Adapters parse only; they can never construct trust.
+- **Stream ingress** — the vendor-blind stream supervisor
+  (`stream_supervisor/`): one outbound connection per active installation whose
+  channel declares `[channel.ingress.stream]`. Connect call and hosts are
+  checked here; dialing is `ironclaw_network`'s; delivered frames enter the same
+  shared admission pipeline as webhooks (`ingress/admission.rs`,
+  `StreamAdmission`) and are acknowledged only after it returns. Frames of one
+  session stay ordered; queues are bounded and a full one stops the reader;
+  reconnect uses exponential jittered backoff. The connection follows the
+  extension's activation (start, replace on re-activation, stop on
+  deactivation, bounded count, graceful `shutdown`).
 - **Channel services (generic, per-extension)** — `GenericChannelHostAssembly`
   (`channel_host.rs`, the ingress reconciler), delivery ports
   (`run_delivery_ports.rs`, `channel_delivery.rs`), egress transports
@@ -99,6 +109,9 @@ cargo test -p ironclaw_architecture_tests                      # the boundary ga
 
 Contract suites live in `tests/`: `lifecycle_contract.rs` (requires
 `test-support`), `lifecycle_restore_contract.rs`, `ingress_router_contract.rs`,
+`stream_supervisor_contract.rs` and `stream_lifecycle_contract.rs` (require
+`test-support`; loopback fake gateway; the lifecycle suite also drives the real
+`GenericChannelHostAssembly`),
 `admin_configuration_{store,service}_contract.rs`.
 
 ## See also

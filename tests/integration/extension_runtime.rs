@@ -113,6 +113,49 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
     .await;
 }
 
+/// The streaming fixture runs the exported stream-ingress conformance
+/// contract: frames decode, delivered data normalizes through the same
+/// `receive` the webhook sibling uses, and hostile bytes never panic.
+#[tokio::test]
+async fn acme_stream_adapter_satisfies_the_stream_conformance_contract() {
+    use ironclaw_extension_contracts::test_support::conformance::{
+        StreamControlConformance, run_stream_control_conformance,
+    };
+    use std::sync::Arc;
+    run_stream_control_conformance(StreamControlConformance {
+        surfaces: reborn_support::harness::profiles::extension::AcmeFixtureStreamAdapter::surfaces(
+        ),
+        extension_id: "acme-messenger-stream".to_string(),
+        installation_id: "acme-stream-install-1".to_string(),
+        config: Vec::new(),
+        event_frame: json!({
+            "kind": "event",
+            "frame_id": "F-1",
+            "payload": {
+                "type": "message",
+                "event_id": "Ev-acme-stream-1",
+                "conversation": "C-ACME-STREAM",
+                "user": "U-ACME-1",
+                "text": "stream hello",
+            },
+        })
+        .to_string()
+        .into_bytes(),
+        reconnect_frame: Some(
+            json!({"kind": "reconnect", "frame_id": "F-2"})
+                .to_string()
+                .into_bytes(),
+        ),
+        vendor_responses: Arc::new(|_request| {
+            ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                retry_after: None,
+                status: 200,
+                body: br#"{"ok":true}"#.to_vec(),
+            }
+        }),
+    })
+    .await;
+}
 /// Full lifecycle — install (which reconciles configured credentials) →
 /// dispatch-from-snapshot → remove — all through model tool calls against the
 /// real dispatcher, matrixed over libSQL and a real PostgreSQL testcontainer

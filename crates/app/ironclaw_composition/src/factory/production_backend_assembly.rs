@@ -364,6 +364,8 @@ pub(super) async fn build_backend_production(
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
+        stream_connector_for_test,
+        #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
     } = context;
     let deployment_is_local_single_user = matches!(
@@ -668,6 +670,17 @@ pub(super) async fn build_backend_production(
     .with_resource_governor(Arc::clone(&resource_governor))
     .with_production_reborn_event_stores_and_sink(event_stores, host_runtime_event_sink)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
+    let stream_connector: Arc<dyn ironclaw_network::WebSocketConnector> = {
+        #[cfg(any(test, feature = "test-support"))]
+        let injected = stream_connector_for_test;
+        #[cfg(not(any(test, feature = "test-support")))]
+        let injected: Option<Arc<dyn ironclaw_network::WebSocketConnector>> = None;
+        injected.unwrap_or_else(|| {
+            Arc::new(ironclaw_network::PolicyWebSocketConnector::new(
+                ironclaw_network::TungsteniteWebSocketTransport::new(),
+            ))
+        })
+    };
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress = match network_http_egress_for_test {
         Some(test_egress) => test_egress,
@@ -1236,6 +1249,10 @@ pub(super) async fn build_backend_production(
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     let admin_configuration_resolver_for_generic = Arc::clone(&admin_configuration_resolver);
     let channel_pairing_registry;
+    // Connection state of stream-ingress channels: fed by the stream supervisor's
+    // audit events (composition fans them out), read by the lifecycle projection.
+    let stream_statuses =
+        Arc::new(ironclaw_extension_host::stream_supervisor::StreamConnectionStatuses::default());
     let channel_host_wiring = {
         let mut reserved_capability_ids: std::collections::BTreeSet<_> = services
             .shared_extension_registry()
@@ -1286,6 +1303,7 @@ pub(super) async fn build_backend_production(
             .await?;
         let pairing_installation_store = Arc::clone(&backend_extension_host.installation_store);
         extension_management.attach_generic_host(Arc::clone(&backend_extension_host.generic_host));
+        extension_management.attach_stream_statuses(Arc::clone(&stream_statuses));
         // The device-link engine rides the generic host's published snapshot,
         // so it can only exist now — fill the auth bundle's deferred slots:
         // the flow driver the product-auth routes dispatch to, and the revoker
@@ -1484,6 +1502,9 @@ pub(super) async fn build_backend_production(
         deployment_channels,
         extension_ingress: channel_host_wiring.extension_ingress,
         channel_pairing: channel_pairing_registry,
+        stream_connector,
+        stream_scope: channel_egress_scope.clone(),
+        stream_statuses,
         delivery_coordinator: channel_host_wiring.delivery_coordinator,
         channel_delivery_resolver: channel_host_wiring.channel_delivery_resolver,
         #[cfg(feature = "test-support")]

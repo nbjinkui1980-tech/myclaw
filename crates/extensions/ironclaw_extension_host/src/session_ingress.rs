@@ -35,7 +35,7 @@ impl SessionChannelDirectory for DeploymentSessionChannelDirectory {
         let Some(ingress) = channel.ingress.as_ref() else {
             return false;
         };
-        channel.supports_inbound() && ingress.verification.is_authenticated_session()
+        channel.supports_inbound() && ingress.is_authenticated_session()
     }
 }
 

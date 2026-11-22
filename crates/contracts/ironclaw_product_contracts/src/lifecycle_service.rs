@@ -12,14 +12,42 @@
 //! product's).
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::command::ProductCommandContext;
 use crate::package_lifecycle::{
     LifecyclePackageRef, LifecycleProductAction, LifecycleProductResponse,
 };
 use crate::surface::ProductSurfaceError;
+
+/// Where one stream-ingress extension's host-held connection stands. Carried
+/// per installed extension next to `activation_error`; a projection of host
+/// state, never derived by a transport or the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionStreamState {
+    /// Active, no connection event yet (boot, or a fresh activation).
+    Connecting,
+    Connected,
+    /// The last connection ended or failed; the host is retrying.
+    Reconnecting,
+    /// Retrying stopped; credentials or limits need an administrator.
+    NeedsAdministrator,
+}
+
+/// The redacted view of one stream connection. `last_error` is a fixed reason
+/// code (for example `connect_unauthorized`), never vendor text, a URL, a
+/// ticket, or a credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtensionStreamConnection {
+    pub state: ExtensionStreamState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_at: Option<DateTime<Utc>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecycleProductSurfaceContext {
@@ -94,6 +122,22 @@ pub trait LifecycleProductService: Send + Sync {
         &self,
         _context: LifecycleProductContext,
     ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductSurfaceError> {
+        Ok(std::collections::HashMap::new())
+    }
+
+    /// Connection state for each ACTIVE stream-ingress extension, keyed by
+    /// extension id. Host-held and in-memory (it is rebuilt by reconnecting
+    /// after a restart), so it is a projection, not a durable record.
+    ///
+    /// Default: none. A service without a stream supervisor reports no
+    /// connection state and the wire field stays absent.
+    async fn installed_stream_connections(
+        &self,
+        _context: LifecycleProductContext,
+    ) -> Result<
+        std::collections::HashMap<ExtensionId, ExtensionStreamConnection>,
+        ProductSurfaceError,
+    > {
         Ok(std::collections::HashMap::new())
     }
 }

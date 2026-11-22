@@ -923,6 +923,81 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelIngress for AcmeFixtu
     }
 }
 
+/// The streaming sibling of [`AcmeFixtureChannelAdapter`] for the
+/// `acme-messenger-stream` fixture manifest: the same invented vendor, but
+/// events arrive as frames on a connection the host dials out.
+///
+/// Frame wire shape: `{"kind":"event","frame_id":..,"payload":{<webhook
+/// event>}}` delivers the payload (the webhook adapter parses it, so both
+/// transports share one `receive`); `{"kind":"ping","frame_id":..}` is
+/// acknowledged; `{"kind":"reconnect","frame_id":..}` is acknowledged and
+/// asks for a new connection; anything else is dropped unacknowledged.
+pub(crate) struct AcmeFixtureStreamAdapter;
+impl AcmeFixtureStreamAdapter {
+    /// Ingress + frame control + the message reply sink the manifest declares.
+    pub(crate) fn surfaces() -> ironclaw_extension_contracts::channel_adapter::ChannelSurfaces {
+        let adapter = Arc::new(Self);
+        ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+            .with_ingress(adapter.clone())
+            .with_stream_control(adapter)
+            .with_reply(Arc::new(AcmeFixtureChannelAdapter))
+    }
+}
+#[async_trait::async_trait]
+impl ironclaw_extension_contracts::channel_adapter::ChannelIngress for AcmeFixtureStreamAdapter {
+    async fn receive(
+        &self,
+        request: ironclaw_extension_contracts::channel_adapter::VerifiedInbound<'_>,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::InboundOutcome,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        AcmeFixtureChannelAdapter.receive(request, egress).await
+    }
+}
+impl ironclaw_extension_contracts::channel_adapter::ChannelStreamControl
+    for AcmeFixtureStreamAdapter
+{
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::StreamFrameDecision,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        use ironclaw_extension_contracts::channel_adapter::{ChannelError, StreamFrameDecision};
+        let parse = |reason: String| ChannelError::Parse { reason };
+        let value: serde_json::Value =
+            serde_json::from_slice(frame).map_err(|error| parse(error.to_string()))?;
+        let frame_id = value
+            .get("frame_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| parse("missing frame_id".to_string()))?;
+        let ack = serde_json::json!({ "ack": frame_id })
+            .to_string()
+            .into_bytes();
+        match value.get("kind").and_then(serde_json::Value::as_str) {
+            Some("event") => {
+                let payload = value
+                    .get("payload")
+                    .ok_or_else(|| parse("missing payload".to_string()))?;
+                let data = serde_json::to_vec(payload).map_err(|error| parse(error.to_string()))?;
+                Ok(StreamFrameDecision::Deliver { data, ack })
+            }
+            Some("ping") => Ok(StreamFrameDecision::Ack(ack)),
+            Some("reconnect") => Ok(StreamFrameDecision::AckAndReconnect(ack)),
+            _ => Ok(StreamFrameDecision::Drop { ack: None }),
+        }
+    }
+    fn session_key(&self, data: &[u8]) -> Option<String> {
+        serde_json::from_slice::<serde_json::Value>(data)
+            .ok()?
+            .get("conversation")?
+            .as_str()
+            .map(str::to_string)
+    }
+}
 /// One vendor mechanism serves both output axes for this fixture, exactly as
 /// it does for a real conversational vendor.
 impl AcmeFixtureChannelAdapter {
@@ -1927,6 +2002,116 @@ pub(crate) fn extension_runtime_acme_tools_profile_with_vendor_script(
 
 pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     extension_runtime_acme_tools_profile()?.build().await
+}
+
+// ── Stream-ingress profile (stream-ingress milestone one, Task 10) ─────────
+
+/// The `runtime.service` of the `acme-messenger-stream` fixture manifest.
+pub(crate) const ACME_STREAM_FIXTURE_SERVICE: &str = "acme-messenger-stream.extension/v1";
+/// The fixture's declared connect call (`[channel.ingress.stream.connect]`).
+const ACME_STREAM_CONNECT_PATH: &str = "/v1/streams/open";
+/// Ticket the fake vendor connect endpoint hands out; a secret the host must
+/// keep out of status, audit, and the model-visible transcript.
+pub(crate) const ACME_STREAM_TICKET: &str = "ITEST-ACME-STREAM-TICKET";
+/// The vendor client secret the fake connect endpoint accepts.
+pub(crate) const ACME_STREAM_ACCEPTED_SECRET: &str = "itest-acme-stream-client-secret";
+
+fn acme_stream_fixture_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/extensions/acme-messenger-stream")
+}
+
+/// Fake vendor connect endpoint: grants a connection (an `wss` endpoint on the
+/// declared gateway host plus a ticket) only to the accepted client secret,
+/// which reaches the request body through the host-side body-credential
+/// injection. Anything else answers 401, the vendor's connection-time
+/// authentication failure. Falls through to the lifecycle profile's router for
+/// every other URL.
+fn acme_stream_connect_router(
+    request: &ironclaw_network::NetworkHttpRequest,
+) -> Option<(u16, Vec<u8>)> {
+    if !request.url.ends_with(ACME_STREAM_CONNECT_PATH) {
+        return hosted_mcp_discovery_fixture_response(request);
+    }
+    let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+    if body.get("clientSecret").and_then(serde_json::Value::as_str)
+        != Some(ACME_STREAM_ACCEPTED_SECRET)
+    {
+        return Some((401, br#"{"error":"invalid_client"}"#.to_vec()));
+    }
+    Some((
+        200,
+        serde_json::to_vec(&serde_json::json!({
+            "endpoint": "wss://gateway.acme.example/ws",
+            "ticket": ACME_STREAM_TICKET,
+        }))
+        .ok()?,
+    ))
+}
+
+struct AcmeStreamFixtureFactory;
+
+#[async_trait::async_trait]
+impl ironclaw_extension_host::NativeExtensionFactory for AcmeStreamFixtureFactory {
+    fn service(&self) -> &str {
+        ACME_STREAM_FIXTURE_SERVICE
+    }
+
+    async fn load(
+        &self,
+        _ctx: &ironclaw_extension_host::LoadContext,
+    ) -> Result<
+        Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
+        ironclaw_extension_host::BindError,
+    > {
+        Ok(Box::new(AcmeStreamFixtureEntrypoint))
+    }
+}
+
+struct AcmeStreamFixtureEntrypoint;
+
+impl ironclaw_extension_host::ExtensionEntrypoint for AcmeStreamFixtureEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
+    {
+        Ok(ironclaw_extension_host::ExtensionBindings {
+            tools: None,
+            channel: AcmeFixtureStreamAdapter::surfaces(),
+            device_link: None,
+        })
+    }
+}
+
+/// The extension-lifecycle profile extended with the invented-vendor STREAM
+/// fixture: its manifest discovered from the storage root, its native factory
+/// binding [`AcmeFixtureStreamAdapter`], and the composed runtime's stream
+/// connector replaced by `connector` (a loopback connector over the fake
+/// gateway). The connect call crosses the recording network egress, answered
+/// by [`acme_stream_connect_router`]; the typed recorder is returned so a test
+/// can read the connect request back.
+pub(crate) fn extension_runtime_acme_stream_tools_profile(
+    connector: Arc<dyn ironclaw_network::WebSocketConnector>,
+) -> HarnessResult<(ToolsProfile, Arc<RecordingNetworkHttpEgress>)> {
+    let egress = Arc::new(
+        RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
+            .with_vendor_router(Arc::new(acme_stream_connect_router)),
+    );
+    let mut profile = extension_lifecycle_tools_profile()?;
+    if let Some(trust) = profile.provider_trust_override.as_mut() {
+        trust.push((
+            ironclaw_host_api::ids::ExtensionId::new("acme-messenger-stream")?,
+            standalone_all_effects(),
+        ));
+    }
+    profile.options = profile
+        .options
+        .with_recording_network_egress(Arc::clone(&egress))
+        .with_fixture_extension_dir(acme_stream_fixture_dir(), "acme-messenger-stream")
+        .with_native_extension_factory(Arc::new(AcmeStreamFixtureFactory))
+        .with_stream_connector_for_test(connector);
+    Ok((profile, egress))
 }
 
 // ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────

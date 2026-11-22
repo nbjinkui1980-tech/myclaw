@@ -226,6 +226,13 @@ pub(crate) fn check_channel_halves(
     )?;
 
     check_half(
+        "stream_control",
+        expected.stream_control,
+        bound.stream_control.is_some(),
+        "stream ingress needs a frame-control half to decode the vendor frames",
+        "no [channel.ingress.stream] declares this channel a stream receiver",
+    )?;
+    check_half(
         "reply",
         expected.reply,
         bound.reply.is_some(),
@@ -246,6 +253,9 @@ pub(crate) fn check_channel_halves(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChannelHalfExpectations {
     pub ingress: bool,
+    /// Whether the manifest declares `[channel.ingress.stream]`, which needs
+    /// the frame-control half next to `ingress`.
+    pub stream_control: bool,
     /// Whether the manifest declares `[channel.reply]` (any transport), hence
     /// whether activation requires a bound reply sink.
     pub reply: bool,
@@ -261,7 +271,11 @@ pub(crate) fn channel_half_expectations(
         ingress: channel
             .ingress
             .as_ref()
-            .is_some_and(|ingress| !ingress.verification.is_authenticated_session()),
+            .is_some_and(|ingress| !ingress.is_authenticated_session()),
+        stream_control: channel
+            .ingress
+            .as_ref()
+            .is_some_and(|ingress| ingress.stream().is_some()),
         reply: channel.supports_reply(),
         delivery: channel.supports_delivery(),
     }
@@ -293,7 +307,7 @@ mod tests {
     use crate::test_support::{
         FakeChannelAdapter, FakeDeviceLinkAdapter, FakeToolAdapter, channel_only_manifest,
         device_link_channel_manifest, mcp_manifest, session_channel_manifest,
-        tool_and_channel_manifest,
+        stream_channel_manifest, tool_and_channel_manifest,
     };
 
     fn bound(tool: bool, channel: bool) -> ExtensionBindings {
@@ -503,6 +517,60 @@ mod tests {
         }
     }
 
+    /// Stream ingress needs the frame-control half beside ingress, and the
+    /// half is refused wherever no `[channel.ingress.stream]` declares it.
+    #[test]
+    fn stream_ingress_binds_frame_control_beside_ingress() {
+        let resolved = stream_channel_manifest();
+        let bind = |channel: ChannelSurfaces| {
+            check_binding(
+                &resolved,
+                &ExtensionBindings {
+                    tools: None,
+                    device_link: None,
+                    channel,
+                },
+            )
+        };
+        bind(FakeChannelAdapter::stream_halves())
+            .expect("ingress + frame control + reply is the exact stream binding");
+        for (axis, bindings) in [
+            ("stream_control", FakeChannelAdapter::all_halves()),
+            (
+                "ingress",
+                ChannelSurfaces::default()
+                    .with_stream_control(Arc::new(FakeChannelAdapter::default()))
+                    .with_reply(Arc::new(FakeChannelAdapter::default())),
+            ),
+        ] {
+            let error = bind(bindings).expect_err("a missing stream half must fail activation");
+            assert!(
+                matches!(error, BindError::ChannelHalfMismatch { axis: reported, .. } if reported == axis),
+                "expected a {axis} mismatch, got {error:?}"
+            );
+        }
+        let webhook = channel_only_manifest();
+        let error = check_binding(
+            &webhook,
+            &ExtensionBindings {
+                tools: None,
+                device_link: None,
+                channel: FakeChannelAdapter::all_halves()
+                    .with_stream_control(Arc::new(FakeChannelAdapter::default())),
+            },
+        )
+        .expect_err("frame control without a declared stream must fail activation");
+        assert!(
+            matches!(
+                error,
+                BindError::ChannelHalfMismatch {
+                    axis: "stream_control",
+                    ..
+                }
+            ),
+            "expected a stream_control mismatch, got {error:?}"
+        );
+    }
     /// A declared reply — `stream` here — needs a bound reply sink and fails
     /// activation without one; `authenticated_session` ingress is still
     /// normalized at the host session door and refuses an ingress half.

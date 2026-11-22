@@ -41,6 +41,9 @@ impl std::fmt::Display for SecretUseMode {
 pub enum NetworkScheme {
     Http,
     Https,
+    /// Outbound WebSocket over TLS. Only the `ironclaw_network` WebSocket
+    /// connector authorizes this scheme; HTTP egress rejects it.
+    Wss,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

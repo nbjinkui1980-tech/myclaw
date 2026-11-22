@@ -98,6 +98,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
+# Fake vendor gateway for the stream-ingress integration test
+# (`tests/integration/extension_stream_ingress.rs`); same versions the
+# extension host's own stream contract tests use.
+futures = "0.3"
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 base64 = "0.22"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
@@ -375,6 +380,10 @@ path = "tests/integration/extension_runtime.rs"
 [[test]]
 name = "reborn_integration_extension_ingress"
 path = "tests/integration/extension_ingress.rs"
+
+[[test]]
+name = "reborn_integration_extension_stream_ingress"
+path = "tests/integration/extension_stream_ingress.rs"
 
 [[test]]
 name = "reborn_integration_extension_delivery"

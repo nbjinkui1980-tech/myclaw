@@ -78,6 +78,26 @@
 
 **影响的文件或 crate。** `ironclaw_network/Cargo.toml`、`Cargo.lock`、`deny.toml`(若需要新增例外)、单一出站边界扫描测试(`reborn_runtime_http_egress_has_single_network_boundary` 一类,需扩展为拒绝其他生产 crate 直接使用 WebSocket 客户端)。
 
+### 1.4 修订记录(2026-11-20):WebSocket 握手由 `ironclaw_network` 手写
+
+**修订内容。** 里程碑一收尾评审的第 7 项指出,`ticket` 在 URL 查询参数里,而 `tokio-tungstenite` 的客户端握手会把完整 URL 解析成 `http::Uri`(内部是不可变的 `Bytes`,不能清零),并把请求行渲染进普通 `Vec<u8>`,所以"`ticket` 只存在于清零缓冲"的承诺做不到。用户(本 ADR 的批准人)于 2026-11-20 决定:**不收窄承诺,改为握手由 `ironclaw_network` 手写**。
+
+**变化。**
+- 连接器在第一个 `?` 处把 URL 拆成不带查询的 endpoint 和查询;策略评估、DNS、URL 解析只接触 endpoint。`#` 一律拒绝。
+- 升级请求由 `ironclaw_network` 构造进一个按精确容量分配的 `Zeroizing<Vec<u8>>`,发送后立即覆写,所有退出路径再覆写一次。响应按 RFC 6455 第 4.2.2 节逐条校验(状态必须是 101、`Upgrade`、`Connection`、常量时间比较 `Sec-WebSocket-Accept`),未请求的 `Sec-WebSocket-Extensions` 与 `Sec-WebSocket-Protocol`、任何 3xx 重定向一律拒绝;非 101 状态仍映射为 `HandshakeRejected{status}`,所以第 5.5 节的 401/403 分类不变。响应头上限 8 KiB,整个握手受 `connect_timeout` 约束。
+- TLS 改为 `ironclaw_network` 直接使用 `tokio-rustls`(与 `reqwest` 相同的 `ring` 提供者和系统原生根证书)。这是第 1.3 节备选方案里"自己用 `tokio-rustls` 握手"的做法,但只用于 WebSocket 出站,信任来源不变,第 1.3 节"不引入第二套证书信任"的决定没有改变。`tokio-tungstenite` 仍是唯一的 WebSocket 帧层,握手后收到的残留字节原样交给它。
+- 新增 `ironclaw_network` 的直接依赖(都已在 `Cargo.lock` 的依赖图里):`httparse`、`subtle`、`rustls`、`tokio-rustls`、`rustls-native-certs`、`rustls-pki-types`。
+
+**残留副本(如实记录,2026-11-20 复核后重写)。** 此前的说法"本 crate 内没有未清零副本、调用方不在范围内"不准确,已撤回。握手路径(`ironclaw_network::websocket`)之外,`ticket` 还经过以下位置,其中前两处无法在不改动共享 HTTP 栈的前提下清零:
+- `ironclaw_network` 的通用 HTTP 响应路径(`transport.rs`):建连响应体(含 `ticket`)由 `reqwest`/`hyper` 缓冲,再累积进普通 `Vec<u8>`,增长时会留下未清零的旧缓冲。主机侧一拿到响应体就移入 `Zeroizing`,但此前的副本不受控。
+- 主机侧把响应体解析为 `serde_json::Value`:`ticket` 在解析树里是普通 `String`,取出后才移入 `Zeroizing`,解析树随后释放但不清零。
+- `rustls` 内部加密前的明文写缓冲,以及内核 socket 缓冲。
+已修复的副本:主机 `build_url` 以最坏情况容量一次分配 `Zeroizing<String>`,不再增长(评审 #7);契约要求 `{ticket}` 位于 `url_template` 第一个 `?` 之后(评审 N2),所以 `ticket` 不会进入路径、`url::Url` 解析或策略评估。
+**已接受的残留。** 上面前两处(HTTP 响应体累积用的普通 `Vec<u8>`,以及 `serde_json::Value` 里 `ticket` 被移出之前的普通 `String`)由批准人(用户)于 2026-11-20 明确接受,不是编码者自行划定的范围。接受的同时不改动共享 HTTP 响应类型,也不收窄其他承诺。
+即使将来改了共享响应类型,`reqwest`、`hyper`、`rustls` 的内部缓冲和内核 socket 缓冲仍会保留副本,所以建连响应路径本来就无法做到全程清零;握手路径的清零承诺(上文"变化"各条)不受影响。
+**后续可选任务(未启动,不在里程碑一范围)。** 给 HTTP 响应体增加敏感标记,让 `ironclaw_network` 自己持有的那部分(`transport.rs` 的响应体累积)改用可清零缓冲。该任务会改共享响应类型,需要单独立项和评审。
+**未改变。** 第 1 节到第 7 节的其余决定,包括主机白名单、`wss` 唯一、禁止重定向、私网拒绝、帧与速率上限。
+
 ## 2. 入站契约
 
 ### 2.1 传输方式改为带标签枚举
@@ -108,12 +128,12 @@
 | `connect` | 建连调用:复用 `ChannelVendorCallRecipe`(method、path、body)加 `body_credentials`,由此 `clientSecret` 只经 host 注入请求体 |
 | `response` | 响应映射:`endpoint` 与 `ticket` 的 JSON 指针;`ticket` 标记为秘密 |
 | `subscriptions` | 订阅主题模板(钉钉为 `type=CALLBACK`、`topic=/v1.0/im/bot/messages/get`) |
-| `url_template` | WebSocket 地址模板,只允许 `{endpoint}` 与 `{ticket}` 两个占位符;`ticket` 进入查询参数,按秘密处理 |
+| `url_template` | WebSocket 地址模板,只允许 `{endpoint}` 与 `{ticket}` 两个占位符各一次;必须以 `{endpoint}` 开头(评审 #9),`{ticket}` 必须位于第一个 `?` 之后(评审 N2);`ticket` 进入查询参数,按秘密处理 |
 | `hosts` | 显式主机列表(见 1.2) |
 | `keepalive` | ping 间隔与 pong 超时 |
 | `max_frame_bytes` | 单帧大小上限 |
 | `max_frames_per_second`(每连接) | 速率上限 |
-| `body_limit_bytes` | 沿用 webhook 的字段名与语义(交给 `receive` 的 body 上限) |
+| ~~`body_limit_bytes`~~ | 修订(2026-11-20):stream 声明不再携带此字段,出现即被安装校验拒绝(评审 #8)。帧上限由 `max_frame_bytes` 表达;webhook 与 session 的 `body_limit_bytes` 不变 |
 
 具体数值(默认值与上限)不在 ADR 里定,Task 3 写进声明校验,Task 6、7 测试。
 
@@ -360,7 +380,7 @@ B 的主要风险是"重复换取的语义未知"。单副本下每次重启最�
 |---|---|---|---|---|
 | 7.1 | 网关返回的 `endpoint` 带来 SSRF | 建连响应被篡改或钉钉侧异常,返回内网地址、云元数据地址或任意公网主机 | 监督器先检查主机精确在声明列表内(1.2);`ironclaw_network` 再做 DNS 解析、私网与保留地址拒绝、连接时复查已解析地址(防 DNS 重绑定);只允许 `wss`;禁止重定向;端口固定 443 或声明值 | Task 2、6 |
 | 7.2 | `clientSecret` 出现在建连请求体 | 请求体或错误信息被写进日志、审计、状态或 trace | 只经 `body_credentials`(`BodyJsonPointer`)由 host 注入;适配器构造的请求体里只有占位;请求体不进日志;注入后的请求体有上限(`post_injection_body_limit_bytes`);测试断言日志与错误中没有秘密 | Task 3、6 |
-| 7.3 | `ticket` 被当作普通字符串 | `ticket` 在 URL 查询参数里,而 URL 常被记录 | 响应映射把 `ticket` 标记为秘密并用秘密类型持有;WebSocket 地址只在连接器内部拼接;错误、日志、状态、审计只带主机名;`ironclaw_network` 的错误输出去掉查询部分(Task 2 测试);每次重连重新换取,不缓存 | Task 2、3、6 |
+| 7.3 | `ticket` 被当作普通字符串 | `ticket` 在 URL 查询参数里,而 URL 常被记录 | 响应映射把 `ticket` 标记为秘密并用秘密类型持有;WebSocket 地址只在连接器内部拼接,策略评估与 DNS 只见不带查询的 endpoint,`ticket` 只在握手边界进入 `Zeroizing` 缓冲,残留副本见 1.4(2026-11-20 重写;前两项由批准人于 2026-11-20 明确接受):HTTP 响应路径、响应解析树、`rustls` 内部明文写缓冲与内核 socket 缓冲;错误、日志、状态、审计只带主机名;`ironclaw_network` 的错误输出去掉查询部分(Task 2 测试);每次重连重新换取,不缓存 | Task 2、3、6 |
 | 7.4 | 重连风暴 | 钉钉频繁 `disconnect`、网络抖动、或凭证错误导致快速重连,打爆建连接口或被钉钉限流 | 指数退避加抖动(1 到 60 秒);健康帧后才重置;认证类失败达阈值进入"需要管理员处理";全局连接数上限;每安装最多一条连接 | Task 7、8 |
 | 7.5 | 帧洪泛 | 大量帧或超大帧耗尽内存和准入容量 | `max_frame_bytes` 与 `ironclaw_network` 的帧/消息大小上限;每连接速率上限;会话队列与全局待处理上限,满则停止读帧(5.1 到 5.3) | Task 2、6、7 |
 | 7.6 | 帧内身份字段 | 帧里的 `senderStaffId`、`conversationId`、`chatbotCorpId`、`robotCode`、头里的 `appId` 被伪造 | 这些字段只有在帧来自本 host 为该安装建立并认证的连接时才可信;安装标识只取自连接所有权,不取自帧(第 3 节铸造时机);帧内字段只作为已认证渠道内的 actor 与会话数据,经现有配对与 `ProviderIdentityActorResolver` 解析;`chatbotCorpId` 的校验依赖其含义,**未验证**(第 8 节条目 9),Task 12 前补查 | Task 4、12、17 |
@@ -813,3 +833,20 @@ tests/support/reborn_parity_qa/network.rs
 - 第 13 节:Task 2 和 Task 4 的 PR 需要说明 `Wss` 与 `AuthenticatedStream` 可能出现在哪些持久化位置。
 
 记录说明:本节由助手按批准人在 2026-11-18 的口头指示写入,批准人可直接修改本节措辞。
+
+### 修订批准
+
+批准人:用户本人
+
+日期:2026-11-20
+
+以下决定是批准人在里程碑一收尾评审的修复阶段,对助手的提问作出的明确回复。原"批准"一节的文字未改动。
+
+| 决定 | 批准人回复 | 内容 |
+|---|---|---|
+| 修复范围 | "1,同意" | 同意修复评审 #1 到 #12,暂缓 #13。这包括第 2.2 节移除 stream 声明的 `body_limit_bytes` 字段(评审 #8),以及帧上限、速率上限的收紧(评审 #2、#11) |
+| #7 目标与方案 | "2#7(ticket 清零)"、"B" | `ticket` 要真正清零,做不到就停下来报告而不是收窄承诺。方案选 B:WebSocket 握手由 `ironclaw_network` 手写,放入 `Zeroizing` 缓冲(见 1.4) |
+| #7 残留副本 | "X" | 接受建连响应路径上的两处残留(`transport.rs` 的响应体累积 `Vec<u8>`,主机侧 `serde_json::Value` 中 `ticket` 移出前的 `String`),如实记录,并把改共享 HTTP 响应类型记为未启动的后续可选任务 |
+| Task 10 测试注入点 | "A" | 为集成测试增加一个 `cfg(test-support)` 注入点(`with_stream_connector_for_test`),并把棘轮的三个冻结计数各上调 1。这一项对应的是里程碑一更早的 Task 10 提交,不在本轮复核的差异里,这里只是补记批准 |
+
+记录说明:本节由助手按批准人在会话中的明确回复写入,批准人可直接修改措辞。

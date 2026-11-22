@@ -268,6 +268,24 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
         </div>
       )}
 
+      {/* Host-held stream connection state (redacted summary built by the
+          backend). The card renders it; it never infers state itself. */}
+      {ext.stream_summary &&
+      (
+        <div
+          data-testid="extension-stream-connection"
+          data-state={ext.stream_connection?.state}
+          className={
+            ext.stream_connection?.state === "needs_administrator"
+              ? "mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-1.5 text-xs text-[var(--v2-danger-text)]"
+              : ext.stream_connection?.state === "connected"
+                ? "mt-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-1.5 text-xs text-[var(--v2-text-muted)]"
+                : "mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-xs text-[var(--v2-warning-text)]"
+          }
+        >
+          {ext.stream_summary}
+        </div>
+      )}
       {needsReconnect &&
       (
         <div

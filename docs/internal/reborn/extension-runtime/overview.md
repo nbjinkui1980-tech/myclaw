@@ -225,6 +225,82 @@ Notes on the sections:
   `none`. Signing secrets never reach a package. Vendor/webhook ingress binds
   `ChannelIngress`; authenticated-session ingress is normalized by the host
   and intentionally binds no package ingress capability.
+- **`[channel.ingress]` has one transport** (a tagged enum,
+  `ChannelIngressTransport`): `webhook` (`route_suffix` + `verification`, the
+  shape above), `authenticated_session`, or `stream`
+  (`[channel.ingress.stream]`). The manifest keeps the flat legacy spelling, so
+  existing webhook and session channels parse unchanged; mixing transports
+  fails to parse. A stream declares the host-run connect call (reusing the
+  vendor-call recipe and `body_credentials`), JSON pointers for the response's
+  `endpoint` and secret `ticket`, subscriptions, a `url_template` with only
+  `{endpoint}`/`{ticket}`, exact `hosts` (no wildcards), keepalive, and frame
+  size and rate bounds. A stream channel binds `ChannelIngress` (frame `data`
+  goes through the same `receive` as a webhook body) plus the pure
+  `ChannelStreamControl` (frame to ack/reconnect/deliver decision). Dialing,
+  ack timing, and evidence minting are host-owned: the stream supervisor
+  (`ironclaw_extension_host::stream_supervisor`) keeps one connection per
+  active stream installation. It runs the declared connect call through the
+  channel's restricted egress, refuses an `endpoint` whose host is not one of
+  the declared `hosts` (or that is not plain `wss` on 443), dials through the
+  policy-checked `ironclaw_network` connector, paces reads to the declared
+  frame rate (it slows the peer, it never drops frames), and sends each
+  delivered frame through the SAME shared admission pipeline webhook requests
+  use (`ingress::StreamAdmission`: adapter `receive`, `reply_context`, durable
+  `(installation, event_id)` dedupe, batch staging, error classification). The
+  vendor's ACK goes out only after that pipeline returns; a transient failure
+  is left unacknowledged for redelivery. The installation, and therefore the
+  evidence subject, is the connection's owner, never a frame field. The ticket
+  and endpoint query never appear in errors, logs, or audit events (host name
+  only). Delivered frames of one session (the control's bounded `session_key`)
+  are admitted one at a time in arrival order; different sessions run
+  concurrently under a supervisor-wide admission cap. Every queue is bounded
+  (per session, per connection): when one is full the reader stops reading the
+  socket, so back-pressure reaches the vendor and no frame is dropped. A frame
+  still queued when its connection ends is never admitted for it (no evidence
+  is minted for a dead connection) and stays unacknowledged for redelivery.
+  Reconnect (vendor `disconnect`, server close, idle/pong timeout) re-runs the
+  connect call for a fresh grant after an exponential, jittered delay that
+  resets only after a frame the stream control accepted. Repeated credential
+  refusals stop the retrying and raise `NeedsAdministrator`; a re-activation
+  with changed credentials starts a fresh connection. A slow receipt-to-ACK
+  time raises a `SlowAck` audit event (the vendor's real ACK window is
+  unverified, so the threshold is provisional).
+  The supervisor's lifecycle follows the active snapshot: an installation
+  whose channel declares a stream gets one connection (a deployment binding
+  wins over the same id's active entry, as for webhooks) at activation or at
+  boot (the supervisor reconciles whatever is already active), a re-activation
+  (what `ChannelConfigService::save` triggers after a credential change)
+  replaces it with a fresh grant, and deactivation or removal stops it and does
+  not redial. `max_connections` bounds live sockets; an installation over the
+  limit is reported `NeedsAdministrator { connection_limit }` and connects when
+  a slot frees. `shutdown()` stops reconciling, lets frames already inside the
+  admission pipeline commit, and closes every socket; the channel host
+  assembly drains each registration's post-admission observers on its own
+  unregistration. The generic channel host registers the stream channel's graph
+  with `AuthenticatedStream` evidence (subject = the owning installation).
+  Composition only assembles the supervisor over the router's
+  `stream_admission()` and the one policy-checked WebSocket connector.
+  Connection state is an in-memory cache (`StreamConnectionStatuses`) fed by
+  the supervisor's own audit events (composition fans each event to the
+  tracing sink and the cache), and enters the extension lifecycle projection:
+  `LifecycleProductService::installed_stream_connections` (default empty)
+  -> `RebornExtensionInfo.stream_connection` (`connecting`, `connected`,
+  `reconnecting`, `needs_administrator`, plus a fixed reason code and time) and
+  a redacted `stream_summary` the extension card renders verbatim, including the
+  single-instance-per-credential notice (the vendor's multi-connection delivery
+  is unverified, so only one replica is promised). The cache holds reason codes
+  only: no host, URL, ticket, or credential. The operator readiness check
+  `channels` is unchanged (still `Unsupported`): per-channel state is served by
+  the projection, not by widening the global readiness probe.
+  Integration proof: `tests/integration/extension_stream_ingress.rs` drives the
+  invented-vendor `acme-messenger-stream` fixture through the production
+  lifecycle tool and the composed runtime's own supervisor. The only
+  substitutions are the vendor connect endpoint (recorded egress) and the
+  connector's transport (`RebornHostBindings::with_stream_connector_for_test`,
+  test-support only: a loopback `PolicyWebSocketConnector` over a fake
+  gateway). It pins connect-after-activation, connect-time refusal ending in
+  `needs_administrator`, admission-before-ACK, duplicate and fresh-sink replay
+  admitted once on libSQL and PostgreSQL, and no redial after deactivation.
 - **`[channel.reply]` and `[channel.delivery]` are orthogonal axes.** Reply is
   source-routed back to a run's input; delivery is target-resolved and may
   happen without a run. Every declared `[channel.reply]` binds one

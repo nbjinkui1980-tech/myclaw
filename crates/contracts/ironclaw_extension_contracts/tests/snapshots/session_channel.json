@@ -1,0 +1,17 @@
+{
+  "id": "session",
+  "display_name": "Session",
+  "conversation_model": "continuous",
+  "ingress": {
+    "method": "post",
+    "body_limit_bytes": 4096,
+    "verification": {
+      "kind": "authenticated_session"
+    }
+  },
+  "presentation": {
+    "supports_markdown": false,
+    "supports_threads": false,
+    "can_reply_in_threads": false
+  }
+}

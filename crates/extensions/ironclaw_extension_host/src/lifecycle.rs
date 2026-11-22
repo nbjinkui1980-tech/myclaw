@@ -656,7 +656,7 @@ impl ExtensionHost {
         }
         if let Some(channel) = &resolved.channel
             && let Some(ingress) = &channel.ingress
-            && let Some(route_suffix) = &ingress.route_suffix
+            && let Some(route_suffix) = ingress.route_suffix()
         {
             let route =
                 crate::ingress::canonical_ingress_path(&record.extension_id, route_suffix.as_str());

@@ -94,7 +94,7 @@ impl DeploymentChannelRegistry {
         let ingress = channel.ingress.as_ref()?;
         // authenticated_session ingress carries no route_suffix and never
         // matches a mounted webhook route — fail closed.
-        let declared_suffix = ingress.route_suffix.as_ref()?;
+        let declared_suffix = ingress.route_suffix()?;
         if !channel.supports_inbound() || declared_suffix.as_str() != route_suffix {
             return None;
         }
@@ -165,6 +165,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stream_channel_binds_its_frame_control_and_mounts_no_webhook_route() {
+        let manifest = Arc::new(crate::test_support::stream_channel_manifest());
+        let registry = DeploymentChannelRegistry::try_new([DeploymentChannelBinding::new(
+            Arc::clone(&manifest),
+            crate::test_support::FakeChannelAdapter::stream_halves(),
+        )
+        .expect("a stream channel binds ingress, frame control, and reply")])
+        .expect("deployment registry validates");
+        for suffix in ["events", "stream", ""] {
+            assert!(
+                registry
+                    .resolve_channel_ingress("acme-messenger-stream", suffix)
+                    .is_none(),
+                "stream ingress mounts no webhook route (`{suffix}`)"
+            );
+        }
+        assert!(
+            DeploymentChannelBinding::new(
+                manifest,
+                crate::test_support::FakeChannelAdapter::all_halves()
+            )
+            .is_err(),
+            "stream ingress without frame control must not bind"
+        );
+    }
     #[test]
     fn deployment_binding_rejects_a_declared_axis_without_its_half() {
         let manifest = Arc::new(crate::test_support::outbound_only_channel_manifest());

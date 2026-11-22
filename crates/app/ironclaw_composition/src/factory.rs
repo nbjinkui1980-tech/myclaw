@@ -427,6 +427,15 @@ pub(crate) struct RebornRuntimeStores {
     /// from the binary-assembled account-setup descriptors; the channel host
     /// assembly consumes it for sink gates and actor resolution.
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
+    /// The one policy-checked WebSocket port stream-ingress channels dial
+    /// through (`ironclaw_network`); production is the rustls transport.
+    pub(crate) stream_connector: Arc<dyn ironclaw_network::WebSocketConnector>,
+    /// Scope the stream connector's network requests run under.
+    pub(crate) stream_scope: ironclaw_host_api::resource::ResourceScope,
+    /// Connection-state cache the supervisor feeds and the lifecycle
+    /// projection reads.
+    pub(crate) stream_statuses:
+        Arc<ironclaw_extension_host::stream_supervisor::StreamConnectionStatuses>,
     /// The generic delivery coordinator (extension-runtime §5.4): the sole
     /// writer of outbound delivery state, resolving channel adapters +
     /// policy egress from deployment bindings or the active compatibility

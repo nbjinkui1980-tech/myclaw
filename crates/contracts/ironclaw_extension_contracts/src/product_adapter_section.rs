@@ -310,6 +310,16 @@ fn validate_auth_requirement(
             validate_http_token("auth.name", name)?;
         }
         AuthRequirement::BearerToken => {}
+        // Host-minted connection evidence; no product-adapter manifest can
+        // declare it (`DeclaredAuth` has no such kind), so reaching it here
+        // means a caller built the requirement by hand. Refuse rather than
+        // accept an undeclarable shape.
+        AuthRequirement::AuthenticatedStream { .. } => {
+            return Err(ProductAdapterSectionError::InvalidValue {
+                field: "auth.kind",
+                reason: "authenticated_stream is host-minted and cannot be declared".to_string(),
+            });
+        }
     }
     Ok(())
 }

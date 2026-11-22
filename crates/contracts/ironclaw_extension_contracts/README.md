@@ -24,7 +24,7 @@ packages depend on product.
 21 shipped modules (`src/lib.rs` is the source of truth; the module-by-module
 charter table lives in [`AGENTS.md`](./AGENTS.md)). The load-bearing entries:
 
-- `channel_adapter` — `ChannelIngress` and `ChannelDelivery` (the reply half is `reply::ReplySink`)
+- `channel_adapter` — `ChannelIngress`, `ChannelStreamControl` (the pure frame protocol of a stream ingress) and `ChannelDelivery` (the reply half is `reply::ReplySink`)
   (a package implements only the capabilities its manifest selects) plus
   `ChannelSurfaces` and their DTO family (`NormalizedInboundMessage`/
   `InboundAttachment`, `OutboundEnvelope`/`Part`, `DeliveryReport`,
@@ -54,7 +54,8 @@ charter table lives in [`AGENTS.md`](./AGENTS.md)). The load-bearing entries:
   port here; `channel_identity` — the identity hooks a host runs around
   binding.
 - `verified_inbound` — the **sealed** channel/webhook mint family
-  (`mark_request_signature_verified`, `mark_shared_secret_header_verified`);
+  (`mark_request_signature_verified`, `mark_shared_secret_header_verified`,
+  and the connection-level `mark_authenticated_stream_verified`);
   every entry point consumes a `VerifiedInboundGrant`, obtainable only by the
   generic ingress verifier.
 - `hosted_mcp` + `lifecycle_id`; `auth_prompt`; `external`; `test_support`

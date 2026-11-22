@@ -242,6 +242,27 @@ fn rejects_auth_header_injection_shape() {
     ));
 }
 
+/// `AuthenticatedStream` is connection-level evidence the host mints for a
+/// channel it dialed itself. A product-adapter manifest must have no way to
+/// declare it (ADR 3, touchpoint 2), under either spelling.
+#[test]
+fn product_adapter_manifest_cannot_declare_authenticated_stream_auth() {
+    for declared in [
+        "kind = \"authenticated_stream\"\nconnection_recipe = \"connect\"",
+        "kind = \"authenticated_stream\"",
+    ] {
+        let raw = manifest("").replace(
+            "kind = \"shared_secret_header\"\nheader_name = \"X-Telegram-Bot-Api-Secret-Token\"",
+            declared,
+        );
+        assert_ne!(raw, manifest(""), "the fixture replacement must apply");
+        assert!(
+            parse(&raw).is_err(),
+            "a product-adapter manifest must not be able to declare {declared:?}"
+        );
+    }
+}
+
 /// A valid public-webhook host-ingress route declaration in manifest wire form.
 /// `{cred}` lets a test swap the verifying credential handle; `{scheme}` lets a
 /// test swap the auth scheme to exercise host_api's fail-closed floor.
