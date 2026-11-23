@@ -590,33 +590,41 @@ impl ExtensionLifecycleManager {
             .map_err(generic_host_error)
     }
 
-    /// Mirror an unpublish into the generic host's snapshot (deactivation is
-    /// tolerant: a not-installed record is already unpublished).
-    async fn unpublish_from_generic_host(&self, extension_id: &ExtensionId) {
+    /// Mirror an unpublish into the generic host's snapshot and drop its
+    /// record. A not-installed record is already unpublished; any other
+    /// failure is returned so removal fails and rolls back instead of
+    /// deleting the installation while the host still dials or serves it.
+    async fn unpublish_from_generic_host(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductOperationFailure> {
         let Some(host) = self.generic_host.get() else {
-            return;
+            return Ok(());
         };
         match host.deactivate(extension_id.as_str()).await {
             Ok(()) | Err(crate::LifecycleError::NotInstalled { .. }) => {}
-            Err(error) => {
-                tracing::warn!(
-                    extension_id = extension_id.as_str(),
-                    error = ?error,
-                    "generic extension host could not unpublish extension"
-                );
-            }
+            Err(error) => return Err(generic_host_error(error)),
         }
-        if let Some(host) = self.generic_host.get()
-            && let Err(error) = host.remove_record(extension_id.as_str()).await
-        {
-            tracing::debug!(
-                extension_id = extension_id.as_str(),
-                error = %error,
-                "generic extension host record cleanup failed"
-            );
-        }
+        host.remove_record(extension_id.as_str())
+            .await
+            .map_err(generic_host_error)
     }
-
+    /// Undo [`Self::unpublish_from_generic_host`] when a later removal step
+    /// fails: the product state is restored, so an installation that was
+    /// enabled must be served (and its stream dialed) by the host again.
+    async fn republish_to_generic_host_after_failed_removal(
+        &self,
+        extension_id: &ExtensionId,
+        installation_id: &ExtensionInstallationId,
+        active_package: &ExtensionPackage,
+        previous_state: ExtensionActivationState,
+    ) -> Result<(), ProductOperationFailure> {
+        if previous_state != ExtensionActivationState::Enabled {
+            return Ok(());
+        }
+        self.publish_to_generic_host(extension_id, installation_id, active_package)
+            .await
+    }
     pub fn with_account_setup_registry(
         mut self,
         account_setups: Arc<dyn ExtensionAccountSetupReader>,
@@ -2440,7 +2448,58 @@ impl ExtensionLifecycleManager {
             }
             return Err(error);
         }
-        self.unpublish_from_generic_host(&extension_id).await;
+        if let Err(error) = self.unpublish_from_generic_host(&extension_id).await {
+            if let Err(restore_error) = self
+                .restore_reserved_membership(membership_reserved, &installation)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to unpublish from the generic host and membership reservation restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = self
+                .restore_lifecycle_package(&lifecycle_package, previous_state)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to unpublish from the generic host and lifecycle restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = self
+                .installation_store
+                .set_activation_state(&installation_id, previous_state)
+                .await
+                .map_err(map_extension_installation_error)
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to unpublish from the generic host and activation restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            // A late `deactivate` or a failed record drop may already have
+            // emptied the host snapshot.
+            if let Err(restore_error) = self
+                .republish_to_generic_host_after_failed_removal(
+                    &extension_id,
+                    &installation_id,
+                    &active_package_for_unpublish,
+                    previous_state,
+                )
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to unpublish from the generic host and host republish failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            return Err(error);
+        }
         if let Err(error) = self
             .active_extensions
             .unpublish(&active_package_for_unpublish)
@@ -2474,6 +2533,21 @@ impl ExtensionLifecycleManager {
                     "extension remove failed to unpublish active package and activation restore failed",
                     error,
                     map_extension_installation_error(cleanup_error),
+                ));
+            }
+            if let Err(restore_error) = self
+                .republish_to_generic_host_after_failed_removal(
+                    &extension_id,
+                    &installation_id,
+                    &active_package_for_unpublish,
+                    previous_state,
+                )
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to unpublish active package and host republish failed",
+                    error,
+                    restore_error,
                 ));
             }
             return Err(error);
@@ -2526,6 +2600,21 @@ impl ExtensionLifecycleManager {
                     restore_error,
                 ));
             }
+            if let Err(restore_error) = self
+                .republish_to_generic_host_after_failed_removal(
+                    &extension_id,
+                    &installation_id,
+                    &active_package_for_unpublish,
+                    previous_state,
+                )
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete installation and host republish failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
             return Err(original_error);
         }
         if let Err(error) = self
@@ -2554,6 +2643,21 @@ impl ExtensionLifecycleManager {
             if let Err(restore_error) = self.restore_installation(&installation).await {
                 return Err(compensation_failure(
                     "extension remove failed to delete files and installation restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = self
+                .republish_to_generic_host_after_failed_removal(
+                    &extension_id,
+                    &installation_id,
+                    &active_package_for_unpublish,
+                    previous_state,
+                )
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete files and host republish failed",
                     error,
                     restore_error,
                 ));
@@ -4256,6 +4360,196 @@ mod tests {
         );
     }
 
+    /// Switchable failing wrapper over the host's derived record store: the
+    /// integration harness cannot inject a failing host record store, so the
+    /// removal-rollback contract is pinned at crate tier.
+    struct FlakyRecordStore {
+        inner: crate::RehydratedInstallationRecordStore,
+        fail_get: std::sync::atomic::AtomicBool,
+        fail_delete: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl crate::InstallationRecordStore for FlakyRecordStore {
+        async fn list(&self) -> Result<Vec<crate::InstallationRecord>, crate::StoreError> {
+            self.inner.list().await
+        }
+        async fn get(
+            &self,
+            extension_id: &str,
+        ) -> Result<Option<crate::InstallationRecord>, crate::StoreError> {
+            if self.fail_get.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::StoreError::Unavailable {
+                    reason: "scripted get failure".to_string(),
+                });
+            }
+            self.inner.get(extension_id).await
+        }
+        async fn upsert(&self, record: crate::InstallationRecord) -> Result<(), crate::StoreError> {
+            self.inner.upsert(record).await
+        }
+        async fn delete(&self, extension_id: &str) -> Result<(), crate::StoreError> {
+            if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::StoreError::Unavailable {
+                    reason: "scripted delete failure".to_string(),
+                });
+            }
+            self.inner.delete(extension_id).await
+        }
+    }
+    /// A removal whose generic-host unpublish or record drop fails must fail
+    /// and roll back: the product installation row keeps its activation state
+    /// and membership, the host keeps serving the extension, and a retry with
+    /// a healthy store succeeds.
+    #[tokio::test]
+    async fn remove_rolls_back_when_the_generic_host_cannot_unpublish() {
+        use crate::test_support::{FakeLoader, FakeToolAdapter};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let package = fixture_extension_package();
+        let extension_id = package.package.id.clone();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let member = UserId::new("lifecycle-member").expect("valid member");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store: installation_store.clone(),
+            lifecycle_service: Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            active_extensions: ActiveExtensionPublisher::new(
+                Arc::clone(&active_registry),
+                Arc::new(
+                    HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                        .expect("trust policy"),
+                ),
+                Arc::new(InvalidationBus::new()),
+            ),
+            credential_cleanup: None,
+            tenant_operator_user_id: UserId::new("lifecycle-operator").expect("valid operator"),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let records = Arc::new(FlakyRecordStore {
+            inner: crate::RehydratedInstallationRecordStore::default(),
+            fail_get: AtomicBool::new(false),
+            fail_delete: AtomicBool::new(false),
+        });
+        let host = Arc::new(
+            crate::ExtensionHost::new(crate::ExtensionHostDeps {
+                store: records.clone(),
+                loader: Arc::new(FakeLoader {
+                    bindings: crate::ExtensionBindings {
+                        tools: Some(Arc::new(FakeToolAdapter)),
+                        channel: Default::default(),
+                        device_link: None,
+                    },
+                    load_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    fail_load: false,
+                }),
+                drain: Arc::new(crate::test_support::RecordingDrain::default()),
+                egress: Arc::new(crate::test_support::FakeEgressFactory),
+                reserved_capability_ids: Default::default(),
+                reserved_ingress_routes: Default::default(),
+                hook_deadline: std::time::Duration::from_secs(5),
+                linked_sessions: crate::LinkedSessionStore::unavailable(),
+                linked_accounts: Arc::new(crate::UnavailableLinkedAccountResolution),
+                admin_secrets: None,
+            })
+            .await,
+        );
+        manager.attach_generic_host(Arc::clone(&host));
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("package ref");
+        manager
+            .install(package_ref.clone(), &member)
+            .await
+            .expect("install succeeds");
+        manager
+            .activate_with_prechecked_credentials_for_user_for_test(package_ref.clone(), &member)
+            .await
+            .expect("activate succeeds");
+        let scope =
+            ResourceScope::local_default(member.clone(), InvocationId::new()).expect("valid scope");
+        let host_serves = || {
+            host.snapshot_watch()
+                .current()
+                .extension(extension_id.as_str())
+        };
+        assert!(host_serves().is_some(), "host serves the active extension");
+
+        // Early unpublish failure (`deactivate` cannot read its record), then a
+        // `remove_record` failure after the host already unpublished.
+        for fail_delete in [false, true] {
+            records.fail_get.store(!fail_delete, Ordering::SeqCst);
+            records.fail_delete.store(fail_delete, Ordering::SeqCst);
+            manager
+                .remove(package_ref.clone(), &scope, Some(&member))
+                .await
+                .expect_err("removal fails while the host cannot unpublish");
+            let rows = installation_store
+                .list_installations()
+                .await
+                .expect("list installations");
+            assert_eq!(
+                rows.len(),
+                1,
+                "installation row survives (delete={fail_delete})"
+            );
+            assert_eq!(
+                rows[0].activation_state(),
+                ExtensionActivationState::Enabled
+            );
+            assert!(
+                rows[0]
+                    .owner()
+                    .members()
+                    .is_some_and(|members| members.contains(&member)),
+                "membership reservation restored (delete={fail_delete})"
+            );
+            assert!(
+                active_registry
+                    .snapshot()
+                    .get_extension(&extension_id)
+                    .is_some(),
+                "product publication restored (delete={fail_delete})"
+            );
+            records.fail_get.store(false, Ordering::SeqCst);
+            records.fail_delete.store(false, Ordering::SeqCst);
+            assert!(
+                host_serves().is_some(),
+                "host still serves the extension (delete={fail_delete})"
+            );
+        }
+
+        manager
+            .remove(package_ref, &scope, Some(&member))
+            .await
+            .expect("retry with a healthy store succeeds");
+        assert!(
+            installation_store
+                .list_installations()
+                .await
+                .expect("list installations")
+                .is_empty()
+        );
+        assert!(host_serves().is_none(), "host unpublished after retry");
+    }
     /// Joining and leaving an existing installation must route through the
     /// store's membership operations, never an aggregate rewrite — the pin
     /// for the lost-update fix: a join leaves the installation record
