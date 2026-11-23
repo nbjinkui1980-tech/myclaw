@@ -157,19 +157,26 @@ mod platform {
         // Convert to hex for storage (keychain prefers strings)
         let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
 
-        set_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT, key_hex.as_bytes())
-            .map_err(|e| SecretError::KeychainError(format!("failed to store in keychain: {}", e)))
+        run_blocking_keychain_call(move || {
+            set_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT, key_hex.as_bytes()).map_err(
+                |e| SecretError::KeychainError(format!("failed to store in keychain: {}", e)),
+            )
+        })
+        .await
     }
 
     /// Retrieve the master key from the macOS Keychain.
     pub(super) async fn get_master_key() -> Result<Vec<u8>, SecretError> {
-        let password = get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|error| {
-            if error.code() == ERR_SEC_ITEM_NOT_FOUND {
-                SecretError::NotFound("master key".to_string())
-            } else {
-                SecretError::KeychainError(format!("failed to get from keychain: {error}"))
-            }
-        })?;
+        let password = run_blocking_keychain_call(|| {
+            get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|error| {
+                if error.code() == ERR_SEC_ITEM_NOT_FOUND {
+                    SecretError::NotFound("master key".to_string())
+                } else {
+                    SecretError::KeychainError(format!("failed to get from keychain: {error}"))
+                }
+            })
+        })
+        .await?;
 
         // Parse hex string back to bytes
         let hex_str = String::from_utf8(password)
@@ -180,14 +187,21 @@ mod platform {
 
     /// Delete the master key from the macOS Keychain.
     pub(super) async fn delete_master_key() -> Result<(), SecretError> {
-        delete_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
-            SecretError::KeychainError(format!("failed to delete from keychain: {}", e))
+        run_blocking_keychain_call(|| {
+            delete_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
+                SecretError::KeychainError(format!("failed to delete from keychain: {}", e))
+            })
         })
+        .await
     }
 
     /// Check if a master key exists in the keychain.
     pub(super) async fn has_master_key() -> bool {
-        get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).is_ok()
+        run_blocking_keychain_call(|| {
+            Ok(get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).is_ok())
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 
@@ -379,28 +393,89 @@ pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
     if os_keychain_suppressed() {
         return Err(SecretError::NotFound("master key".to_string()));
     }
-    platform::get_master_key().await
+    wait_for_os_keychain(
+        platform::get_master_key(),
+        KEYCHAIN_APPROVAL_NOTICE_AFTER,
+        || log_keychain_approval_wait("read"),
+    )
+    .await
 }
 
 pub async fn has_master_key() -> bool {
     if os_keychain_suppressed() {
         return false;
     }
-    platform::has_master_key().await
+    wait_for_os_keychain(
+        platform::has_master_key(),
+        KEYCHAIN_APPROVAL_NOTICE_AFTER,
+        || log_keychain_approval_wait("lookup"),
+    )
+    .await
 }
 
 pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
     if os_keychain_suppressed() {
         return Err(SecretError::KeychainError(SUPPRESSED_MESSAGE.to_string()));
     }
-    platform::store_master_key(key).await
+    wait_for_os_keychain(
+        platform::store_master_key(key),
+        KEYCHAIN_APPROVAL_NOTICE_AFTER,
+        || log_keychain_approval_wait("write"),
+    )
+    .await
 }
 
 pub async fn delete_master_key() -> Result<(), SecretError> {
     if os_keychain_suppressed() {
         return Err(SecretError::KeychainError(SUPPRESSED_MESSAGE.to_string()));
     }
-    platform::delete_master_key().await
+    wait_for_os_keychain(
+        platform::delete_master_key(),
+        KEYCHAIN_APPROVAL_NOTICE_AFTER,
+        || log_keychain_approval_wait("delete"),
+    )
+    .await
+}
+
+/// How long an OS keychain call may stay pending before a notice is logged.
+const KEYCHAIN_APPROVAL_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Awaits an OS keychain call. If it is still pending after `notice_after`,
+/// runs `notice` once and keeps waiting: the call may be blocked on an OS
+/// approval prompt that a person has to answer, so it is never cancelled.
+async fn wait_for_os_keychain<F: std::future::Future>(
+    call: F,
+    notice_after: std::time::Duration,
+    notice: impl FnOnce(),
+) -> F::Output {
+    tokio::pin!(call);
+    tokio::select! {
+        biased;
+        output = &mut call => return output,
+        () = tokio::time::sleep(notice_after) => notice(),
+    }
+    call.await
+}
+
+fn log_keychain_approval_wait(operation: &'static str) {
+    tracing::warn!(
+        operation,
+        waited_secs = KEYCHAIN_APPROVAL_NOTICE_AFTER.as_secs(),
+        "still waiting for the OS keychain (secrets master key); the OS may be showing an \
+         approval prompt for this binary. On macOS an ad-hoc-signed binary has to be \
+         approved again after every rebuild; startup continues once the prompt is answered"
+    );
+}
+
+/// Runs a synchronous Keychain Services call on the blocking pool, so a call
+/// waiting for an approval prompt does not hold an async worker.
+#[cfg(target_os = "macos")]
+async fn run_blocking_keychain_call<T: Send + 'static>(
+    call: impl FnOnce() -> Result<T, SecretError> + Send + 'static,
+) -> Result<T, SecretError> {
+    tokio::task::spawn_blocking(call).await.map_err(|error| {
+        SecretError::KeychainError(format!("keychain call did not complete: {error}"))
+    })?
 }
 
 /// Parse a hex string to bytes.
@@ -626,5 +701,74 @@ mod tests {
             delete_master_key().await,
             Err(SecretError::KeychainError(_))
         ));
+    }
+
+    // why: an OS keychain read can block on an approval prompt (macOS asks
+    // again after every rebuild of an ad-hoc-signed binary); without a notice
+    // the process just hangs with nothing in the log.
+    #[tokio::test(start_paused = true)]
+    async fn a_keychain_call_still_pending_after_the_threshold_logs_one_notice() {
+        let notices = std::sync::atomic::AtomicUsize::new(0);
+        let value = wait_for_os_keychain(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                7
+            },
+            std::time::Duration::from_secs(5),
+            || {
+                notices.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert_eq!(value, 7, "the call's own result is returned");
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_keychain_call_that_returns_in_time_logs_nothing() {
+        let notices = std::sync::atomic::AtomicUsize::new(0);
+        let value = wait_for_os_keychain(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                7
+            },
+            std::time::Duration::from_secs(5),
+            || {
+                notices.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert_eq!(value, 7);
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    // why: Keychain Services calls are synchronous; on an async worker a
+    // pending approval prompt would also stall every task on that worker
+    // (and the whole runtime on a current-thread runtime).
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_blocking_keychain_call_does_not_stall_the_async_runtime() {
+        let ticked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ticker = {
+            let ticked = std::sync::Arc::clone(&ticked);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                ticked.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        let observed = {
+            let ticked = std::sync::Arc::clone(&ticked);
+            run_blocking_keychain_call(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Ok(ticked.load(std::sync::atomic::Ordering::SeqCst))
+            })
+            .await
+            .expect("blocking call result")
+        };
+        assert!(
+            observed,
+            "another task ran while the blocking keychain call was in progress"
+        );
+        ticker.await.expect("ticker task");
     }
 }
