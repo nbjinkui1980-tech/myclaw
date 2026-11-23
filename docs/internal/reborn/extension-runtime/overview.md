@@ -286,7 +286,9 @@ Notes on the sections:
   `LifecycleProductService::installed_stream_connections` (default empty)
   -> `RebornExtensionInfo.stream_connection` (`connecting`, `connected`,
   `reconnecting`, `needs_administrator`, plus a fixed reason code and time) and
-  a redacted `stream_summary` the extension card renders verbatim, including the
+  a redacted English `stream_summary` (omits the retained last error while
+  connected). The WebUI card builds its own localized text from `stream_connection`
+  (state plus reason code) and carries the
   single-instance-per-credential notice (the vendor's multi-connection delivery
   is unverified, so only one replica is promised). The cache holds reason codes
   only: no host, URL, ticket, or credential. The operator readiness check
