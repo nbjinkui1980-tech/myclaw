@@ -38,12 +38,14 @@ Grouped by responsibility (all modules are `pub`; see `src/lib.rs`):
   reconnect uses exponential jittered backoff. The connection follows the
   extension's activation (start, replace on re-activation, stop on
   deactivation, bounded count, graceful `shutdown`). A deployment-bound
-  stream connection never changes source identity, so it restarts on the
-  administrator configuration-change signal (`StreamConfigurationChanges`,
-  raised by `StreamRestartingReactivation` around the re-activation port).
-  It runs only while an installation of the extension is active: nothing
-  dials before an install, the last removal closes it, and a reinstall
-  reconnects without a signal.
+  stream connection follows the installation record instead of the active
+  snapshot: it runs while the record exists (deactivation and re-activation
+  leave it up), nothing dials before an install, the last removal closes it,
+  and a reinstall reconnects because the record's installation incarnation
+  differs (`installation_incarnations.rs`, minted in `ExtensionHost::install`,
+  dropped in `remove_record`). It restarts on the administrator
+  configuration-change signal (`StreamConfigurationChanges`, raised by
+  `StreamRestartingReactivation` around the re-activation port), once per save.
 - **Channel services (generic, per-extension)** — `GenericChannelHostAssembly`
   (`channel_host.rs`, the ingress reconciler), delivery ports
   (`run_delivery_ports.rs`, `channel_delivery.rs`), egress transports

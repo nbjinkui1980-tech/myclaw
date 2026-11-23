@@ -115,6 +115,17 @@ header before "fixing" the omission. The two memory providers are crates the
 binary links; exactly one `[memory]` provider is active per deployment, and
 `memory-native` ships installed by default.
 
+## Deployment channels and installations
+
+A host-initiated outbound stream connection (`[channel.ingress.stream]`)
+follows installations: it dials only while an installation record exists for
+the extension, the last Remove closes it, and a reinstall reconnects.
+Deactivation and re-activation (including an administrator configuration save)
+do not close it; the configuration-change signal restarts it once. A passive
+inbound webhook route does not follow installations: a deployment-bound route
+still resolves with no installation
+(`resolves_manifest_route_without_an_active_installation`).
+
 ## What never belongs here
 
 - **Host authority in a package.** A package never verifies a signature, mints

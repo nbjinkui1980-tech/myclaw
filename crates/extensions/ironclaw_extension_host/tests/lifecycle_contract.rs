@@ -860,6 +860,101 @@ async fn snapshot_watch_subscription_observes_every_publish() {
     assert!(watch.current().extension("acme").is_none());
 }
 
+#[tokio::test]
+async fn installation_incarnation_follows_the_record_not_the_activation() {
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let h = harness_with(
+        tool_and_channel_bindings(Arc::clone(&channel)),
+        Arc::clone(&channel),
+    )
+    .await;
+    let watch = h.host.snapshot_watch();
+    assert_eq!(watch.installation_incarnation("acme"), None);
+
+    h.host
+        .install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    let first = watch.installation_incarnation("acme").expect("minted");
+    h.host.activate("acme").await.unwrap();
+    h.host.deactivate("acme").await.unwrap();
+    h.host
+        .install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    assert_eq!(watch.installation_incarnation("acme"), Some(first));
+
+    h.host.remove_record("acme").await.unwrap();
+    assert_eq!(watch.installation_incarnation("acme"), None);
+    h.host
+        .install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    assert!(watch.installation_incarnation("acme").unwrap() > first);
+}
+
+/// A store whose delete fails, to pin that the incarnation outlives the record.
+struct FailingDeleteStore(RehydratedInstallationRecordStore);
+
+#[async_trait::async_trait]
+impl InstallationRecordStore for FailingDeleteStore {
+    async fn list(&self) -> Result<Vec<InstallationRecord>, ironclaw_extension_host::StoreError> {
+        self.0.list().await
+    }
+    async fn get(
+        &self,
+        extension_id: &str,
+    ) -> Result<Option<InstallationRecord>, ironclaw_extension_host::StoreError> {
+        self.0.get(extension_id).await
+    }
+    async fn upsert(
+        &self,
+        record: InstallationRecord,
+    ) -> Result<(), ironclaw_extension_host::StoreError> {
+        self.0.upsert(record).await
+    }
+    async fn delete(&self, _extension_id: &str) -> Result<(), ironclaw_extension_host::StoreError> {
+        Err(ironclaw_extension_host::StoreError::Unavailable {
+            reason: "delete refused".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_failed_record_delete_keeps_the_installation_incarnation() {
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let deps = ExtensionHostDeps {
+        store: Arc::new(FailingDeleteStore(
+            RehydratedInstallationRecordStore::default(),
+        )),
+        loader: Arc::new(FakeLoader {
+            bindings: tool_and_channel_bindings(channel),
+            load_calls: Arc::new(AtomicUsize::new(0)),
+            fail_load: false,
+        }),
+        drain: Arc::new(RecordingDrain::default()) as Arc<_>,
+        egress: Arc::new(FakeEgressFactory),
+        reserved_capability_ids: Default::default(),
+        reserved_ingress_routes: Default::default(),
+        hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
+    };
+    let host = ExtensionHost::new(deps).await;
+    let watch = host.snapshot_watch();
+    host.install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    let minted = watch.installation_incarnation("acme");
+    assert!(minted.is_some());
+
+    host.remove_record("acme").await.unwrap_err();
+    assert_eq!(watch.installation_incarnation("acme"), minted);
+}
+
 // ── Snapshot resolution at the dispatch seam (TOOL-1 snapshot side, TOOL-10) ──
 
 #[tokio::test]

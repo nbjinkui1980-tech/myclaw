@@ -4,6 +4,14 @@
 //! manifest-declared channel before any user installs the extension.  This
 //! registry therefore stays deliberately separate from [`crate::ActiveSnapshot`],
 //! which remains the user installation/tool activation projection.
+//!
+//! A binding has no installation of its own, and the two transports treat that
+//! differently. A passive inbound webhook route resolves with or without an
+//! installation. A host-initiated outbound stream connection follows
+//! installations: the stream supervisor dials only while the host holds an
+//! installation record for the extension (see
+//! [`crate::SnapshotWatch::installation_incarnation`]), the last removal
+//! closes it, and a reinstall reconnects.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

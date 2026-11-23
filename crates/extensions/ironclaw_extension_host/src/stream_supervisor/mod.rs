@@ -1,6 +1,7 @@
 //! The generic stream-ingress supervisor.
 //!
-//! For every active installation whose channel declares
+//! For every active installation (or, for a deployment-bound channel, every
+//! existing installation) whose channel declares
 //! `[channel.ingress.stream]`, the supervisor keeps one outbound connection:
 //! it runs the declared connect call through the channel's restricted egress,
 //! dials the granted endpoint through the policy-checked network connector,
@@ -61,7 +62,7 @@ pub struct StreamSupervisorConfig {
     /// Consecutive credential refusals (or declaration/endpoint rejections)
     /// after which retrying stops and an administrator has to act. A changed
     /// credential starts a fresh connection (a re-activation for an active
-    /// source, a configuration-change signal for a deployment source).
+    /// source, the configuration-change signal for a deployment source).
     pub auth_failure_threshold: u32,
     /// Live connections the supervisor keeps at once. An installation over the
     /// limit is reported as `NeedsAdministrator` and retried as soon as a
@@ -114,8 +115,8 @@ pub struct StreamSupervisorDeps {
     pub scope: ResourceScope,
     pub audit: Arc<dyn StreamAuditSink>,
     /// Administrator configuration changes; a change restarts the extension's
-    /// deployment-sourced connection (an active-sourced one restarts with the
-    /// re-published snapshot).
+    /// deployment-sourced connection once (an active-sourced one restarts with
+    /// the re-published snapshot).
     pub configuration_changes: Arc<StreamConfigurationChanges>,
 }
 
@@ -181,6 +182,7 @@ impl StreamSupervisor {
     pub fn start(deps: StreamSupervisorDeps, config: StreamSupervisorConfig) -> Arc<Self> {
         let mut subscription = deps.watch.subscribe();
         let mut changes = deps.configuration_changes.subscribe();
+        let mut installations = deps.watch.subscribe_installations();
         let supervisor = Arc::new(Self {
             deps,
             admissions: Arc::new(tokio::sync::Semaphore::new(
@@ -215,6 +217,11 @@ impl StreamSupervisor {
                             break;
                         }
                     }
+                    changed = installations.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
                     () = task_ended.notified() => {}
                 }
             }
@@ -229,24 +236,35 @@ impl StreamSupervisor {
         let mut desired = HashMap::new();
         let snapshot: Arc<ActiveSnapshot> = self.deps.watch.current();
         // A deployment binding is assembled once for the process, so it cannot
-        // tell whether anything is installed. The connection runs only while
-        // the extension has an active installation, which makes remove and
-        // deactivate stop it and a reinstall start it again.
-        for extension_id in self.deps.deployment_channels.extension_ids() {
-            if snapshot.extension(&extension_id).is_none() {
+        // tell whether anything is installed. The connection follows the
+        // installation record instead: it runs while the record exists
+        // (deactivation and re-activation, including an administrator save,
+        // leave it up), removing the record stops it, and installing again
+        // starts a new one because the incarnation differs. The active
+        // snapshot is not consulted for a deployment-bound extension.
+        let deployment_ids = self.deps.deployment_channels.extension_ids();
+        for extension_id in &deployment_ids {
+            let Some(incarnation) = self.deps.watch.installation_incarnation(extension_id) else {
                 continue;
-            }
-            if let Some(binding) = self.deps.deployment_channels.extension(&extension_id) {
-                desired.insert(extension_id, StreamSource::Deployment(binding));
+            };
+            if let Some(binding) = self.deps.deployment_channels.extension(extension_id) {
+                desired.insert(
+                    extension_id.clone(),
+                    StreamSource::Deployment {
+                        binding,
+                        incarnation,
+                    },
+                );
             }
         }
         for extension_id in snapshot.extension_ids() {
+            // Deployment bindings win for the same extension id, exactly as
+            // for webhook ingress, whether or not an installation exists.
+            if deployment_ids.contains(&extension_id) {
+                continue;
+            }
             if let Some(active) = snapshot.extension(&extension_id) {
-                // Deployment bindings win for the same extension id, exactly
-                // as for webhook ingress.
-                desired
-                    .entry(extension_id)
-                    .or_insert(StreamSource::Active(active));
+                desired.insert(extension_id, StreamSource::Active(active));
             }
         }
         desired.retain(|_, source| source.stream().is_some());
