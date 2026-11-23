@@ -82,7 +82,8 @@ use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::harness::profiles::extension::{
-    DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, DINGTALK_TOKEN_PREFIX, DingTalkVendor,
+    DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, DINGTALK_ROTATED_CLIENT_SECRET,
+    DINGTALK_TOKEN_PREFIX, DingTalkVendor,
 };
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::{Value, json};
@@ -1329,7 +1330,11 @@ async fn server_error_journey() {
 
 /// Save the DingTalk administrator secrets through `builtin.admin_configuration_replace`,
 /// the capability the WebUI extension-configuration save invokes.
-async fn configure_dingtalk_admin(group: &RebornIntegrationGroup, values: Value) {
+async fn configure_dingtalk_admin(
+    group: &RebornIntegrationGroup,
+    values: Value,
+    expected_revision: u64,
+) {
     use ironclaw_host_api::{
         action::NetworkPolicy,
         capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -1414,7 +1419,7 @@ async fn configure_dingtalk_admin(group: &RebornIntegrationGroup, values: Value)
             ResourceEstimate::default(),
             json!({
                 "group_id": "extension.dingtalk",
-                "expected_revision": 0,
+                "expected_revision": expected_revision,
                 "values": values,
             }),
         ))
@@ -1491,6 +1496,7 @@ async fn administrator_saved_credentials_journey() {
             {"handle": "dingtalk_client_id", "value": DINGTALK_CLIENT_ID},
             {"handle": "dingtalk_client_secret", "value": DINGTALK_CLIENT_SECRET},
         ]),
+        0,
     )
     .await;
     wait_until(
@@ -1573,6 +1579,7 @@ async fn remove_and_reinstall_journey() {
             {"handle": "dingtalk_client_id", "value": DINGTALK_CLIENT_ID},
             {"handle": "dingtalk_client_secret", "value": DINGTALK_CLIENT_SECRET},
         ]),
+        0,
     )
     .await;
     wait_until(
@@ -1606,13 +1613,11 @@ async fn remove_and_reinstall_journey() {
         "the connection state to clear",
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(gateway.accepts(), 1, "no redial after the removal");
-    assert_eq!(
-        requests_to(egress, "/v1.0/gateway/connections/open").len(),
-        connects_before,
-        "no connect call after the removal"
-    );
+    // No wall-clock wait for "nothing redials": the ordered evidence is that
+    // the reinstall below produces the only new accept and connect call, and
+    // the exact totals are asserted after a settled frame. The deterministic
+    // negative (no dial while no installation exists) is the crate-tier
+    // `reconcile_fence` test in `stream_lifecycle_contract.rs`.
     assert!(
         !channel_connection
             .caller_channel_connected(EXTENSION, &user)
@@ -1662,4 +1667,207 @@ async fn remove_and_reinstall_journey() {
         "the connect-required notice for the unpaired sender",
     )
     .await;
+    assert_eq!(gateway.closed(), 1, "only the removal closed a socket");
+    assert_eq!(gateway.accepts(), 2, "removal and reinstall dial once");
+    assert_eq!(
+        requests_to(egress, "/v1.0/gateway/connections/open").len(),
+        connects_before + 1,
+        "exactly one connect call for the reinstall"
+    );
+}
+
+async fn save_initial_credentials_and_connect(journey: &Journey) {
+    use ironclaw_product_contracts::lifecycle_service::ExtensionStreamState;
+    wait_until(
+        || stream_state(journey.services()).is_some(),
+        "the stopped connection state before credentials exist",
+    )
+    .await;
+    configure_dingtalk_admin(
+        &journey.group,
+        json!([
+            {"handle": "dingtalk_client_id", "value": DINGTALK_CLIENT_ID},
+            {"handle": "dingtalk_client_secret", "value": DINGTALK_CLIENT_SECRET},
+        ]),
+        0,
+    )
+    .await;
+    wait_until(
+        || stream_state(journey.services()) == Some((ExtensionStreamState::Connected, None)),
+        "the connection after the administrator saved credentials",
+    )
+    .await;
+    assert_eq!(journey.gateway.accepts(), 1);
+}
+/// An administrator save of a rotated secret against a connected stream
+/// restarts the connection exactly once, and the new connection serves frames.
+#[tokio::test]
+async fn dingtalk_administrator_save_restarts_a_connected_stream_exactly_once() {
+    Box::pin(admin_save_restart_journey()).await;
+}
+async fn admin_save_restart_journey() {
+    use ironclaw_product_contracts::lifecycle_service::ExtensionStreamState;
+    let journey = Box::pin(Journey::start_with(
+        "restart",
+        true,
+        Credentials::AdministratorLater,
+    ))
+    .await;
+    let (gateway, egress) = (&journey.gateway, &journey.egress);
+    save_initial_credentials_and_connect(&journey).await;
+    let connects_before = requests_to(egress, "/v1.0/gateway/connections/open").len();
+    configure_dingtalk_admin(
+        &journey.group,
+        json!([
+            {"handle": "dingtalk_client_id", "value": DINGTALK_CLIENT_ID},
+            {"handle": "dingtalk_client_secret", "value": DINGTALK_ROTATED_CLIENT_SECRET},
+        ]),
+        1,
+    )
+    .await;
+    wait_until(|| gateway.accepts() == 2, "the restart's new connection").await;
+    wait_until(|| gateway.closed() == 1, "the old socket to close").await;
+    wait_until(
+        || stream_state(journey.services()) == Some((ExtensionStreamState::Connected, None)),
+        "the reconnected state",
+    )
+    .await;
+    gateway.send(callback_frame(
+        "S-1",
+        &callback_data("S-1-msg", CORP, STAFF, DM_CONVERSATION, "hello"),
+    ));
+    journey.settle_frame("S-1").await;
+    let connects = requests_to(egress, "/v1.0/gateway/connections/open");
+    assert_eq!(connects.len(), connects_before + 1, "one connect call");
+    let body: Value =
+        serde_json::from_slice(&connects.last().expect("a connect call").body).expect("JSON");
+    assert_eq!(body["clientSecret"], DINGTALK_ROTATED_CLIENT_SECRET);
+    assert_eq!(gateway.accepts(), 2, "one restart, one new connection");
+    assert_eq!(gateway.closed(), 1, "one restart, one closed socket");
+}
+/// Remove then reinstall back-to-back, without waiting for the socket to
+/// close in between: the old socket closes once and one new one is accepted.
+#[tokio::test]
+async fn dingtalk_back_to_back_remove_and_reinstall_replaces_the_connection_once() {
+    Box::pin(back_to_back_journey()).await;
+}
+async fn back_to_back_journey() {
+    use ironclaw_product_contracts::lifecycle_service::ExtensionStreamState;
+    let journey = Box::pin(Journey::start_with(
+        "backtoback",
+        true,
+        Credentials::AdministratorLater,
+    ))
+    .await;
+    let (gateway, egress) = (&journey.gateway, &journey.egress);
+    save_initial_credentials_and_connect(&journey).await;
+    let connects_before = requests_to(egress, "/v1.0/gateway/connections/open").len();
+    dingtalk_lifecycle_turn(&journey.group, "b2b-remove", "builtin.extension_remove").await;
+    dingtalk_lifecycle_turn(&journey.group, "b2b-reinstall", "builtin.extension_install").await;
+    wait_until(|| gateway.accepts() == 2, "the replacement connection").await;
+    wait_until(|| gateway.closed() == 1, "the old socket to close").await;
+    wait_until(
+        || stream_state(journey.services()) == Some((ExtensionStreamState::Connected, None)),
+        "the reconnected state",
+    )
+    .await;
+    gateway.send(callback_frame(
+        "B-1",
+        &callback_data("B-1-msg", CORP, STAFF, DM_CONVERSATION, "hello"),
+    ));
+    journey.settle_frame("B-1").await;
+    assert_eq!(gateway.accepts(), 2, "one new connection");
+    assert_eq!(gateway.closed(), 1, "one close");
+    assert_eq!(
+        requests_to(egress, "/v1.0/gateway/connections/open").len(),
+        connects_before + 1,
+        "one connect call"
+    );
+}
+/// Two members install the extension: the second install does not redial,
+/// the first member's removal keeps the connection, and the last removal
+/// closes it.
+#[tokio::test]
+async fn dingtalk_stream_stays_up_until_the_last_member_removes() {
+    Box::pin(two_member_journey()).await;
+}
+async fn two_member_journey() {
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_product_contracts::surface::ProductSurfaceCaller;
+    use reborn_support::webui_mount::{mount_webui_v2_router, post_json};
+    let journey = Box::pin(Journey::start_with(
+        "members",
+        true,
+        Credentials::AdministratorLater,
+    ))
+    .await;
+    let (gateway, egress) = (&journey.gateway, &journey.egress);
+    save_initial_credentials_and_connect(&journey).await;
+    let connects_before = requests_to(egress, "/v1.0/gateway/connections/open").len();
+    let surface = journey
+        .services()
+        .product_surface(None)
+        .expect("production product surface builds");
+    let binding = &journey.inbound.binding;
+    let second = mount_webui_v2_router(
+        surface,
+        ProductSurfaceCaller::new(
+            binding.tenant_id.clone(),
+            UserId::new("second-member").expect("second member id"),
+            binding.agent_id.clone(),
+            binding.project_id.clone(),
+        ),
+    );
+    let (status, body) = post_json(
+        second.clone(),
+        "/api/webchat/v2/extensions/install",
+        json!({
+            "package_ref": {"kind": "extension", "id": EXTENSION},
+            "client_action_id": "second-member-install"
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "second member install: {body}");
+    // A frame served by the original socket proves the second install did not
+    // replace it.
+    gateway.send(callback_frame(
+        "M-1",
+        &callback_data("M-1-msg", CORP, STAFF, DM_CONVERSATION, "hello"),
+    ));
+    journey.settle_frame("M-1").await;
+    assert_eq!(gateway.accepts(), 1, "the second install does not redial");
+    assert_eq!(gateway.closed(), 0);
+    // The first member removes: the second member still holds an installation.
+    dingtalk_lifecycle_turn(&journey.group, "members-remove", "builtin.extension_remove").await;
+    gateway.send(callback_frame(
+        "M-2",
+        &callback_data("M-2-msg", CORP, STAFF, DM_CONVERSATION, "still there?"),
+    ));
+    journey.settle_frame("M-2").await;
+    assert_eq!(gateway.accepts(), 1, "a non-final removal does not redial");
+    assert_eq!(gateway.closed(), 0, "a non-final removal keeps the socket");
+    assert_eq!(
+        requests_to(egress, "/v1.0/gateway/connections/open").len(),
+        connects_before,
+        "no connect call after the second install or the first removal"
+    );
+    // The last member removes: the connection closes.
+    let (status, body) = post_json(
+        second,
+        &format!("/api/webchat/v2/extensions/{EXTENSION}/remove"),
+        json!({"client_action_id": "second-member-remove"}),
+    )
+    .await;
+    assert_eq!(status, 200, "second member remove: {body}");
+    wait_until(
+        || gateway.closed() == 1,
+        "the final removal to close the socket",
+    )
+    .await;
+    wait_until(
+        || stream_state(journey.services()).is_none(),
+        "the connection state to clear",
+    )
+    .await;
+    assert_eq!(gateway.accepts(), 1);
 }
