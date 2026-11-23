@@ -13,6 +13,7 @@ import {
   authAccountNeedsReconnect,
   authAccountNeedsScopeUpdate,
   authAccountReasonLabelKey,
+  streamConnectionDisplay,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
 import type {
@@ -154,6 +155,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   const displayName = ext.display_name || packageId(ext);
   const canManage = Boolean(ext.package_ref);
   const tools = ext.tools || [];
+  const streamDisplay = streamConnectionDisplay(ext.stream_connection);
   const [capsOpen, setCapsOpen] = React.useState(false);
 
   const setupState = state === "setup_needed";
@@ -268,9 +270,10 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
         </div>
       )}
 
-      {/* Host-held stream connection state (redacted summary built by the
-          backend). The card renders it; it never infers state itself. */}
-      {ext.stream_summary &&
+      {/* Host-held stream connection state. The text is built here from the
+          typed state and fixed reason code so it follows the UI language; the
+          card never infers state itself. */}
+      {streamDisplay.stateKey &&
       (
         <div
           data-testid="extension-stream-connection"
@@ -283,7 +286,18 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
                 : "mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-xs text-[var(--v2-warning-text)]"
           }
         >
-          {ext.stream_summary}
+          <span>{t(streamDisplay.stateKey)}</span>
+          {(streamDisplay.reasonKey || streamDisplay.rawReason) &&
+          (
+            <>
+              {" "}
+              <span>{t("extensions.streamReasonLabel")}</span>
+              {" "}
+              <span>{streamDisplay.reasonKey ? t(streamDisplay.reasonKey) : streamDisplay.rawReason}</span>
+            </>
+          )}
+          {" "}
+          <span>{t("extensions.streamSingleInstance")}</span>
         </div>
       )}
       {needsReconnect &&
@@ -337,7 +351,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
                 />
               </button>
             )
-          : (<span className="font-mono text-[11px] text-[var(--v2-text-faint)]">{t("extensions.noCapabilities")}</span>)}
+          : (<span className="font-mono text-[11px] text-[var(--v2-text-faint)]">{t(hasChannelSurface(ext) ? "extensions.noCapabilitiesChannel" : "extensions.noCapabilities")}</span>)}
         <span className="flex-1"></span>
         {primary &&
         (

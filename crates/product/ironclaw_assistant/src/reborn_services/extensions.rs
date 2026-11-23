@@ -537,11 +537,16 @@ fn stream_summary(connection: &ExtensionStreamConnection) -> String {
             "Stopped reconnecting: an administrator must check the channel credentials or limits."
         }
     };
-    let reason = connection
-        .last_error
-        .as_deref()
-        .map(|code| format!(" Last error: {code}."))
-        .unwrap_or_default();
+    // The host retains the last error across a reconnect; it is history, not
+    // current state, so a connected stream does not repeat it.
+    let reason = match connection.state {
+        ExtensionStreamState::Connected => String::new(),
+        _ => connection
+            .last_error
+            .as_deref()
+            .map(|code| format!(" Last error: {code}."))
+            .unwrap_or_default(),
+    };
     format!(
         "{state}{reason} Run only one IronClaw instance per application credential; a second instance (or environment) using the same credentials can take messages."
     )
@@ -1667,6 +1672,13 @@ mod tests {
         for (state, error, expected_phrase) in [
             (ExtensionStreamState::Connecting, None, "Connecting"),
             (ExtensionStreamState::Connected, None, "Connected"),
+            // The host retains the last error across a reconnect; a healthy
+            // stream must not repeat it.
+            (
+                ExtensionStreamState::Connected,
+                Some("config_unavailable"),
+                "Connected",
+            ),
             (
                 ExtensionStreamState::Reconnecting,
                 Some("connect_unavailable"),
@@ -1703,7 +1715,11 @@ mod tests {
                 "the single-replica notice is always shown: {summary}"
             );
             if let Some(code) = error {
-                assert!(summary.contains(code), "{summary}");
+                assert_eq!(
+                    summary.contains(code),
+                    state != ExtensionStreamState::Connected,
+                    "{summary}"
+                );
             }
             // Nothing that could carry a secret or an endpoint is on the wire.
             let wire = serde_json::to_string(extension).expect("serializes");

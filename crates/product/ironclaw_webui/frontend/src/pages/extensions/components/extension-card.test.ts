@@ -13,6 +13,7 @@ import {
   authAccountNeedsReconnect,
   authAccountNeedsScopeUpdate,
   authAccountReasonLabelKey,
+  streamConnectionDisplay,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
 
@@ -113,6 +114,7 @@ function makeContext(): vm.Context {
     authAccountNeedsReconnect,
   authAccountNeedsScopeUpdate,
     authAccountReasonLabelKey,
+    streamConnectionDisplay,
     RUNTIME_LABELS,
     STATE_TONES,
     STATE_LABELS,
@@ -473,27 +475,53 @@ test("failed extension renders its activation_error as a danger reason banner", 
   );
 });
 
-test("a stream channel renders the host's connection summary and no secrets", () => {
-  const summary =
-    "Disconnected from the vendor stream; reconnecting. Last error: connect_unavailable. Run only one IronClaw instance per application credential; a second instance (or environment) using the same credentials can take messages.";
-  const rendered = renderExtensionCard({
-    package_ref: { id: "acme-stream" },
-    runtime: "first_party",
-    display_name: "Acme stream",
-    installation_state: "active",
-    stream_connection: { state: "reconnecting", last_error: "connect_unavailable" },
-    stream_summary: summary,
-  });
+test("a stream channel renders localized connection text built from state and reason code", () => {
+  const stream = (connection, extra = {}) =>
+    renderExtensionCard({
+      package_ref: { id: "acme-stream" },
+      runtime: "first_party",
+      display_name: "Acme stream",
+      installation_state: "active",
+      stream_connection: connection,
+      // The server summary is English-only; the card must not render it.
+      stream_summary: "SERVER ENGLISH SUMMARY",
+      ...extra,
+    });
+  const reconnecting = stream({ state: "reconnecting", last_error: "connect_unavailable" });
+  assert.equal(renderedContainsValue(reconnecting, "streamReconnecting"), true);
   assert.equal(
-    renderedContainsValue(rendered, summary),
+    renderedContainsValue(reconnecting, "streamReasonNetwork"),
     true,
-    "the redacted backend summary is rendered verbatim",
+    "a known reason code renders its localized label",
   );
+  assert.equal(renderedContainsValue(reconnecting, "streamSingleInstance"), true);
+  assert.equal(renderedContainsValue(reconnecting, "reconnecting"), true, "state is exposed on the banner");
   assert.equal(
-    renderedContainsValue(rendered, "reconnecting"),
-    true,
-    "the state is exposed on the banner",
+    renderedContainsValue(reconnecting, "SERVER ENGLISH SUMMARY"),
+    false,
+    "the English server summary is not rendered verbatim",
   );
+  const connected = stream({ state: "connected", last_error: "config_unavailable" });
+  assert.equal(renderedContainsValue(connected, "streamConnected"), true);
+  assert.equal(renderedContainsValue(connected, "streamSingleInstance"), true);
+  assert.equal(
+    renderedContainsValue(connected, "config_unavailable"),
+    false,
+    "a retained last_error is not shown while connected",
+  );
+  assert.equal(renderedContainsValue(connected, "streamReasonConfig"), false);
+  const admin = stream({ state: "needs_administrator", last_error: "connection_limit" });
+  assert.equal(renderedContainsValue(admin, "streamNeedsAdministrator"), true);
+  assert.equal(renderedContainsValue(admin, "streamReasonLimit"), true);
+  const unknown = stream({ state: "connecting", last_error: "brand_new_code" });
+  assert.equal(renderedContainsValue(unknown, "streamConnecting"), true);
+  assert.equal(
+    renderedContainsValue(unknown, "brand_new_code"),
+    true,
+    "an unknown reason code falls back to the raw code",
+  );
+  const noError = stream({ state: "connecting" });
+  assert.equal(renderedContainsValue(noError, "streamReasonLabel"), false);
   const absent = renderExtensionCard({
     package_ref: { id: "acme" },
     runtime: "first_party",
@@ -505,6 +533,27 @@ test("a stream channel renders the host's connection summary and no secrets", ()
     false,
     "an extension without a stream renders no connection banner",
   );
+});
+test("a channel-only extension explains it has no tools; a bare extension keeps the generic text", () => {
+  const channelOnly = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    display_name: "Acme",
+    installation_state: "active",
+    surfaces: channelSurfaces,
+    tools: [],
+  });
+  assert.equal(renderedContainsValue(channelOnly, "noCapabilitiesChannel"), true);
+  assert.equal(renderedContainsValue(channelOnly, "noCapabilities"), false);
+  const bare = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    display_name: "Acme",
+    installation_state: "active",
+    tools: [],
+  });
+  assert.equal(renderedContainsValue(bare, "noCapabilities"), true);
+  assert.equal(renderedContainsValue(bare, "noCapabilitiesChannel"), false);
 });
 test("disconnected auth accounts render a distinct reason per last_error, not a generic expiry notice (G4)", () => {
   // A revoked grant is disconnected-with-a-reason, not the `expired` state —

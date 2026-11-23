@@ -118,3 +118,52 @@ const AUTH_ACCOUNT_REASON_LABELS = {
 export function authAccountReasonLabelKey(account) {
   return AUTH_ACCOUNT_REASON_LABELS[account?.last_error] || "extensions.accountExpired";
 }
+
+const STREAM_STATE_LABELS = {
+  connecting: "extensions.streamConnecting",
+  connected: "extensions.streamConnected",
+  reconnecting: "extensions.streamReconnecting",
+  needs_administrator: "extensions.streamNeedsAdministrator",
+};
+
+// Fixed reason codes from the host stream supervisor, grouped by what the
+// operator can do about them. Unknown codes fall back to the raw code.
+const STREAM_REASON_LABELS = {
+  config_unavailable: "extensions.streamReasonConfig",
+  stream_not_bound: "extensions.streamReasonConfig",
+  connect_target_undeclared: "extensions.streamReasonConfig",
+  connect_request_invalid: "extensions.streamReasonConfig",
+  connect_unauthorized: "extensions.streamReasonCredentials",
+  credentials_refused: "extensions.streamReasonCredentials",
+  handshake_unauthorized: "extensions.streamReasonCredentials",
+  connect_rejected: "extensions.streamReasonCredentials",
+  connect_credentials_missing: "extensions.streamReasonCredentialsMissing",
+  connect_transport: "extensions.streamReasonNetwork",
+  connect_unavailable: "extensions.streamReasonNetwork",
+  connect_timeout: "extensions.streamReasonNetwork",
+  idle_timeout: "extensions.streamReasonNetwork",
+  peer_closed: "extensions.streamReasonNetwork",
+  connection_limit: "extensions.streamReasonLimit",
+  connect_policy_denied: "extensions.streamReasonPolicy",
+  connect_response_too_large: "extensions.streamReasonProtocol",
+  connect_response_invalid: "extensions.streamReasonProtocol",
+  decode_failed: "extensions.streamReasonProtocol",
+  deterministic_failure: "extensions.streamReasonInternal",
+  adapter_bound_violation: "extensions.streamReasonInternal",
+  connection_task_panicked: "extensions.streamReasonInternal",
+};
+
+/**
+ * i18n keys (and raw fallback) for a host stream connection. The retained
+ * `last_error` is a history of the previous failure, so it is only surfaced
+ * while the stream is not healthy.
+ */
+export function streamConnectionDisplay(connection) {
+  const stateKey = STREAM_STATE_LABELS[connection?.state] || null;
+  const code = connection?.last_error || null;
+  if (!stateKey || !code || connection.state === "connected") {
+    return { stateKey, reasonKey: null, rawReason: null };
+  }
+  const reasonKey = STREAM_REASON_LABELS[code] || null;
+  return { stateKey, reasonKey, rawReason: reasonKey ? null : code };
+}
