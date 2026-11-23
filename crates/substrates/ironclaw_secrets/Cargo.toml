@@ -34,3 +34,5 @@ secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Paused clock for the keychain approval-wait notice tests.
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "test-util"] }
