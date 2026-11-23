@@ -520,6 +520,24 @@ test("a stream channel renders localized connection text built from state and re
     true,
     "an unknown reason code falls back to the raw code",
   );
+  const codes = {
+    config_unavailable: "streamReasonConfig",
+    connect_transport: "streamReasonNetwork",
+    connect_unauthorized: "streamReasonCredentials",
+    connection_limit: "streamReasonLimit",
+    idle_timeout: "streamReasonNetwork",
+    stopped: "streamReasonStopped",
+    reconnect_requested: "streamReasonStopped",
+    connect_credentials_missing: "streamReasonCredentialsMissing",
+  };
+  for (const [code, key] of Object.entries(codes)) {
+    const r = stream({ state: "reconnecting", last_error: code });
+    assert.equal(renderedContainsValue(r, key), true, `${code} maps to ${key}`);
+    assert.equal(renderedContainsValue(r, code), false, `${code} is not rendered raw`);
+  }
+  const futureState = stream({ state: "paused_by_future" });
+  assert.equal(renderedContainsValue(futureState, "paused_by_future"), true, "unknown state still renders");
+  assert.equal(renderedContainsValue(futureState, "streamSingleInstance"), true);
   const noError = stream({ state: "connecting" });
   assert.equal(renderedContainsValue(noError, "streamReasonLabel"), false);
   const absent = renderExtensionCard({

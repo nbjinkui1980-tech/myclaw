@@ -143,6 +143,8 @@ const STREAM_REASON_LABELS = {
   connect_timeout: "extensions.streamReasonNetwork",
   idle_timeout: "extensions.streamReasonNetwork",
   peer_closed: "extensions.streamReasonNetwork",
+  stopped: "extensions.streamReasonStopped",
+  reconnect_requested: "extensions.streamReasonStopped",
   connection_limit: "extensions.streamReasonLimit",
   connect_policy_denied: "extensions.streamReasonPolicy",
   connect_response_too_large: "extensions.streamReasonProtocol",
@@ -160,10 +162,12 @@ const STREAM_REASON_LABELS = {
  */
 export function streamConnectionDisplay(connection) {
   const stateKey = STREAM_STATE_LABELS[connection?.state] || null;
+  // A state this build does not know still renders (raw), never hides the banner.
+  const rawState = !stateKey && connection?.state ? String(connection.state) : null;
   const code = connection?.last_error || null;
-  if (!stateKey || !code || connection.state === "connected") {
-    return { stateKey, reasonKey: null, rawReason: null };
+  if ((!stateKey && !rawState) || !code || connection.state === "connected") {
+    return { stateKey, rawState, reasonKey: null, rawReason: null };
   }
   const reasonKey = STREAM_REASON_LABELS[code] || null;
-  return { stateKey, reasonKey, rawReason: reasonKey ? null : code };
+  return { stateKey, rawState, reasonKey, rawReason: reasonKey ? null : code };
 }

@@ -1242,6 +1242,7 @@ registerPack("hi", {
   "extensions.streamReasonPolicy": "नेटवर्क नीति ने कनेक्शन रोक दिया।",
   "extensions.streamReasonProtocol": "प्रदाता ने अमान्य या बहुत बड़ा उत्तर भेजा।",
   "extensions.streamReasonInternal": "स्ट्रीम कनेक्शन में आंतरिक त्रुटि।",
+  "extensions.streamReasonStopped": "कनेक्शन रोका गया या बंद हो गया।",
   "extensions.defaultName": "एक्सटेंशन",
   "extensions.installedSuccess": "{name} इंस्टॉल किया गया",
   "extensions.removedSuccess": "{name} हटाया गया",

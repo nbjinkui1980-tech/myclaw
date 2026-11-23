@@ -1242,6 +1242,7 @@ registerPack("ja", {
   "extensions.streamReasonPolicy": "ネットワークポリシーにより接続がブロックされました。",
   "extensions.streamReasonProtocol": "提供元から無効または大きすぎる応答が返されました。",
   "extensions.streamReasonInternal": "ストリーム接続の内部エラーです。",
+  "extensions.streamReasonStopped": "接続が停止または切断されました。",
   "extensions.defaultName": "拡張機能",
   "extensions.installedSuccess": "{name} をインストールしました",
   "extensions.removedSuccess": "{name} を削除しました",

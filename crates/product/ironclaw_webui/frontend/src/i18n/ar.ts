@@ -1242,6 +1242,7 @@ registerPack("ar", {
   "extensions.streamReasonPolicy": "حظرت سياسة الشبكة الاتصال.",
   "extensions.streamReasonProtocol": "أرسل المزوّد استجابة غير صالحة أو كبيرة جدًا.",
   "extensions.streamReasonInternal": "خطأ داخلي في اتصال التدفق.",
+  "extensions.streamReasonStopped": "تم إيقاف الاتصال أو إغلاقه.",
   "extensions.defaultName": "ملحق",
   "extensions.installedSuccess": "تم تثبيت {name}",
   "extensions.removedSuccess": "تمت إزالة {name}",

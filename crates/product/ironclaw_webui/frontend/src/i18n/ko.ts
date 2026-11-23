@@ -1242,6 +1242,7 @@ registerPack("ko", {
   "extensions.streamReasonPolicy": "네트워크 정책이 연결을 차단했습니다.",
   "extensions.streamReasonProtocol": "제공자가 잘못되었거나 너무 큰 응답을 보냈습니다.",
   "extensions.streamReasonInternal": "스트림 연결 내부 오류입니다.",
+  "extensions.streamReasonStopped": "연결이 중지되었거나 닫혔습니다.",
   "extensions.defaultName": "확장 프로그램",
   "extensions.installedSuccess": "{name} 설치됨",
   "extensions.removedSuccess": "{name} 제거됨",

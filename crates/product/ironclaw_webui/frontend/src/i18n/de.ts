@@ -1242,6 +1242,7 @@ registerPack("de", {
   "extensions.streamReasonPolicy": "die Verbindung wurde durch die Netzwerkrichtlinie blockiert.",
   "extensions.streamReasonProtocol": "der Anbieter hat eine ungültige oder zu große Antwort gesendet.",
   "extensions.streamReasonInternal": "interner Fehler in der Stream-Verbindung.",
+  "extensions.streamReasonStopped": "die Verbindung wurde beendet oder geschlossen.",
   "extensions.defaultName": "Erweiterung",
   "extensions.installedSuccess": "{name} installiert",
   "extensions.removedSuccess": "{name} entfernt",

@@ -273,7 +273,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       {/* Host-held stream connection state. The text is built here from the
           typed state and fixed reason code so it follows the UI language; the
           card never infers state itself. */}
-      {streamDisplay.stateKey &&
+      {(streamDisplay.stateKey || streamDisplay.rawState) &&
       (
         <div
           data-testid="extension-stream-connection"
@@ -286,7 +286,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
                 : "mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-xs text-[var(--v2-warning-text)]"
           }
         >
-          <span>{t(streamDisplay.stateKey)}</span>
+          <span>{streamDisplay.stateKey ? t(streamDisplay.stateKey) : streamDisplay.rawState}</span>
           {(streamDisplay.reasonKey || streamDisplay.rawReason) &&
           (
             <>

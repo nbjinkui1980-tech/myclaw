@@ -1243,6 +1243,7 @@ registerPack("es", {
   "extensions.streamReasonPolicy": "la política de red bloqueó la conexión.",
   "extensions.streamReasonProtocol": "el proveedor envió una respuesta no válida o demasiado grande.",
   "extensions.streamReasonInternal": "error interno en la conexión del flujo.",
+  "extensions.streamReasonStopped": "la conexión se detuvo o se cerró.",
   "extensions.defaultName": "Extensión",
   "extensions.installedSuccess": "{name} se instaló",
   "extensions.removedSuccess": "{name} se eliminó",

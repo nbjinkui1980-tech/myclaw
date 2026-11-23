@@ -1242,6 +1242,7 @@ registerPack("fr", {
   "extensions.streamReasonPolicy": "la connexion a été bloquée par la politique réseau.",
   "extensions.streamReasonProtocol": "le fournisseur a envoyé une réponse invalide ou trop volumineuse.",
   "extensions.streamReasonInternal": "erreur interne de la connexion au flux.",
+  "extensions.streamReasonStopped": "la connexion a été arrêtée ou fermée.",
   "extensions.defaultName": "Extension",
   "extensions.installedSuccess": "{name} a été installée",
   "extensions.removedSuccess": "{name} a été supprimée",

@@ -1241,6 +1241,7 @@ registerPack("zh-CN", {
   "extensions.streamReasonPolicy": "连接被网络策略拦截。",
   "extensions.streamReasonProtocol": "对方返回了无效或过大的响应。",
   "extensions.streamReasonInternal": "消息流连接内部错误。",
+  "extensions.streamReasonStopped": "连接已停止或被关闭。",
   "extensions.defaultName": "扩展",
   "extensions.installedSuccess": "已安装 {name}",
   "extensions.removedSuccess": "已移除 {name}",

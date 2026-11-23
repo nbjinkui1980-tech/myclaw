@@ -1350,6 +1350,7 @@ registerPack("en", {
   "extensions.streamReasonPolicy": "the connection was blocked by network policy.",
   "extensions.streamReasonProtocol": "the vendor sent an invalid or oversized response.",
   "extensions.streamReasonInternal": "internal error in the stream connection.",
+  "extensions.streamReasonStopped": "the connection was stopped or closed.",
   "extensions.defaultName": "Extension",
   "extensions.installedSuccess": "{name} installed",
   "extensions.removedSuccess": "{name} removed",

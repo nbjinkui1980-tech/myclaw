@@ -1242,6 +1242,7 @@ registerPack("uk", {
   "extensions.streamReasonPolicy": "підключення заблоковано мережевою політикою.",
   "extensions.streamReasonProtocol": "постачальник надіслав недійсну або завелику відповідь.",
   "extensions.streamReasonInternal": "внутрішня помилка підключення до потоку.",
+  "extensions.streamReasonStopped": "з'єднання зупинено або закрито.",
   "extensions.defaultName": "Розширення",
   "extensions.installedSuccess": "{name} установлено",
   "extensions.removedSuccess": "{name} видалено",
