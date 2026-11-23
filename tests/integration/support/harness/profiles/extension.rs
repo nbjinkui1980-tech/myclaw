@@ -2383,6 +2383,15 @@ pub(crate) const DINGTALK_FIXTURE_SERVICE: &str = "dingtalk.extension/v1";
 /// test values, never real credentials.
 pub(crate) const DINGTALK_CLIENT_ID: &str = "itest-dingtalk-client-id";
 pub(crate) const DINGTALK_CLIENT_SECRET: &str = "itest-dingtalk-client-secret";
+/// A second secret the fake endpoints also accept, so a test can rotate the
+/// ClientSecret against a connected stream.
+pub(crate) const DINGTALK_ROTATED_CLIENT_SECRET: &str = "itest-dingtalk-rotated-client-secret";
+fn dingtalk_secret_accepted(secret: Option<&str>) -> bool {
+    matches!(
+        secret,
+        Some(DINGTALK_CLIENT_SECRET | DINGTALK_ROTATED_CLIENT_SECRET)
+    )
+}
 /// Ticket the fake connect endpoint hands out.
 pub(crate) const DINGTALK_TICKET: &str = "ITEST-DINGTALK-TICKET";
 /// Prefix of every access token the fake token endpoint issues.
@@ -2429,7 +2438,7 @@ impl DingTalkVendor {
         if request.url.ends_with(DINGTALK_CONNECT_PATH) {
             let body = body()?;
             if field(&body, "clientId").as_deref() != Some(DINGTALK_CLIENT_ID)
-                || field(&body, "clientSecret").as_deref() != Some(DINGTALK_CLIENT_SECRET)
+                || !dingtalk_secret_accepted(field(&body, "clientSecret").as_deref())
             {
                 return Some((401, br#"{"code":"invalidClient"}"#.to_vec()));
             }
@@ -2445,7 +2454,7 @@ impl DingTalkVendor {
         if request.url.ends_with(DINGTALK_TOKEN_PATH) {
             let body = body()?;
             if field(&body, "appKey").as_deref() != Some(DINGTALK_CLIENT_ID)
-                || field(&body, "appSecret").as_deref() != Some(DINGTALK_CLIENT_SECRET)
+                || !dingtalk_secret_accepted(field(&body, "appSecret").as_deref())
             {
                 return Some((401, br#"{"code":"invalidClient"}"#.to_vec()));
             }

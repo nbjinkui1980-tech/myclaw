@@ -48,6 +48,8 @@ ironclaw serve
 </Step>
 <Step title="安装扩展">
 打开 **Extensions**，找到 **DingTalk** 并安装。激活扩展后，IronClaw 会连接钉钉。
+
+只保存凭证不会建立连接。在有人安装扩展之前，IronClaw 不会连接钉钉，机器人不会回复，卡片上也不显示连接状态。
 </Step>
 <Step title="把机器人加入测试群（可选）">
 要在群里使用，请先在钉钉中把机器人加入该群。群里只有 @机器人 的消息才会得到回复。
@@ -71,11 +73,22 @@ ironclaw serve
 | `credentials_refused`、`connect_unauthorized` | 钉钉拒绝了 ClientID 或 ClientSecret。请重新复制两者，确认没有多余空格，并确认应用已发布。 |
 | `handshake_unauthorized` | 钉钉拒绝了连接票据。请重新激活扩展以获取新票据；如反复出现，请检查凭证。 |
 | `connect_unavailable` | 建连请求失败（网络问题或钉钉不可用）。请确认主机可以通过 HTTPS 访问 `api.dingtalk.com`。 |
-| `connection_limit` | IronClaw 已达到流式连接数量上限，需要先停用其他流式扩展。 |
+| `connection_limit` | IronClaw 已达到流式连接数量上限，需要先移除其他流式扩展。 |
 | `config_unavailable` | 部署配置缺失或不完整。请填全 DingTalk 卡片中的两个字段。 |
 | 网络策略拒绝类的码 | 钉钉返回的网关主机不在扩展声明的主机列表内。主机名 `wss-open-connection.dingtalk.com` **尚未核实**，请把该码反馈给维护者，不要自行绕过。 |
 
 卡片上还会提醒您：每组凭证只运行一个实例。
+
+---
+
+## 停止渠道
+
+在 **Extensions** 页面移除 DingTalk 扩展。只有存在已安装的扩展时，IronClaw 才会保持与钉钉的连接，所以最后一位用户移除后连接会关闭，在重新安装之前不会再连接钉钉。重新安装后无需重启 IronClaw 即可重新连接。
+
+重新安装后保留与不保留的内容：
+
+- **保留：** 在 **Admin → Configuration** 中保存的 ClientID 和 ClientSecret，无需重新填写。
+- **不保留：** 执行移除的用户的配对。移除只删除该用户自己的配对，该用户重新安装后需要再次配对。其他用户的配对不会因别人的移除而删除；仍安装着扩展的用户无需重新配对即可继续对话。
 
 ---
 

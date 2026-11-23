@@ -62,6 +62,7 @@ mod hosted_mcp_preparation;
 pub mod inbound_batches;
 pub mod ingress;
 pub mod install_policy;
+pub mod installation_incarnations;
 pub mod lifecycle;
 pub mod lifecycle_restore;
 pub mod lifecycle_vocabulary;

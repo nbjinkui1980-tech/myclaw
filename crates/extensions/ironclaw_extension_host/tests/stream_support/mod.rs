@@ -809,16 +809,21 @@ impl Harness {
         ));
     }
 
+    /// The installation record [`Self::activate`] installs.
+    pub fn installation_record(&self) -> InstallationRecord {
+        InstallationRecord {
+            extension_id: EXTENSION_ID.to_string(),
+            installation_id: INSTALLATION_ID.to_string(),
+            state: InstallationState::Installed,
+            resolved: Arc::clone(&self.manifest),
+            config: Vec::new(),
+            last_error: None,
+        }
+    }
+
     pub async fn activate(&self) {
         self.host
-            .install(InstallationRecord {
-                extension_id: EXTENSION_ID.to_string(),
-                installation_id: INSTALLATION_ID.to_string(),
-                state: InstallationState::Installed,
-                resolved: Arc::clone(&self.manifest),
-                config: Vec::new(),
-                last_error: None,
-            })
+            .install(self.installation_record())
             .await
             .expect("install");
         self.host.activate(EXTENSION_ID).await.expect("activate");

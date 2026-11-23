@@ -77,6 +77,10 @@ enter each of them once.
 <Step title="Install the extension">
 Open **Extensions**, find **DingTalk**, and install it. Activating the extension makes
 IronClaw connect to DingTalk.
+
+Saving the credentials alone does not connect. Until someone installs the extension,
+IronClaw does not dial DingTalk, the robot does not respond, and the card shows no
+connection state.
 </Step>
 <Step title="Add the robot to a test group (optional)">
 To use the robot in a group, add the robot to that group in DingTalk. In groups the
@@ -101,11 +105,29 @@ The DingTalk card under **Extensions** shows the connection state.
 | `credentials_refused`, `connect_unauthorized` | DingTalk refused the ClientID or ClientSecret. Re-copy both from the console, check there are no spaces, and confirm the application is published. |
 | `handshake_unauthorized` | DingTalk rejected the connection ticket. Reactivate the extension to request a new one; if it repeats, check the credentials. |
 | `connect_unavailable` | The connection request failed (network or DingTalk unavailable). Check that the host can reach `api.dingtalk.com` over HTTPS. |
-| `connection_limit` | IronClaw is already holding its maximum number of stream connections. Another stream extension must be deactivated first. |
+| `connection_limit` | IronClaw is already holding its maximum number of stream connections. Another stream extension must be removed first. |
 | `config_unavailable` | The deployment configuration is missing or incomplete. Fill in both fields of the DingTalk card. |
 | a network policy denial code | The gateway host DingTalk returned is not in the extension's declared host list. The host name `wss-open-connection.dingtalk.com` is **unverified**; report the code to the maintainers rather than working around it. |
 
 The card also reminds you to run a single instance per credential.
+
+---
+
+## Stop the channel
+
+Remove the DingTalk extension in **Extensions**. IronClaw holds the DingTalk connection
+only while someone has the extension installed, so it closes once the last user removes
+it, and nothing dials DingTalk again until the extension is installed again. Installing
+it again reconnects without restarting IronClaw.
+
+What a reinstall keeps and what it does not:
+
+- **Kept:** the ClientID and ClientSecret saved under **Admin → Configuration**. You do
+  not enter them again.
+- **Not kept:** the pairing of the person who removed the extension. Removing deletes
+  only that person's pairing, so they pair again after reinstalling. Other people's
+  pairings are not deleted by someone else's removal; anyone who still has the
+  extension installed keeps chatting without pairing again.
 
 ---
 

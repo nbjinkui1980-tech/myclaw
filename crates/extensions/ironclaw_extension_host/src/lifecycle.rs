@@ -25,6 +25,7 @@ use crate::active::{
     ActiveExtension, ActiveSnapshot, BoundExtension, Generation, SnapshotConflict,
 };
 use crate::entrypoint::{BindError, check_binding};
+use crate::installation_incarnations::InstallationIncarnations;
 use crate::linked_session_custody::LinkedSessionStore;
 use crate::loaders::{ExtensionLoader, LoadContext};
 use crate::store::{InstallationRecord, InstallationRecordStore, StoreError};
@@ -187,11 +188,16 @@ pub struct ExtensionHost {
     /// Receiver template cloned into every [`SnapshotWatch`]; also keeps the
     /// channel alive independent of external subscribers.
     snapshot_published_rx: tokio::sync::watch::Receiver<u64>,
+    /// Which installations exist and which life of each this is. Written only
+    /// under `lifecycle_lock`; see [`InstallationIncarnations`].
+    incarnations: tokio::sync::watch::Sender<Arc<InstallationIncarnations>>,
 }
 
 struct LifecycleState {
     snapshot: Arc<ActiveSnapshot>,
     generation: u64,
+    /// Last incarnation number handed out; never reused.
+    next_incarnation: u64,
 }
 
 /// A cloneable, synchronous view of the current active snapshot.
@@ -199,6 +205,7 @@ struct LifecycleState {
 pub struct SnapshotWatch {
     cell: Arc<RwLock<Arc<ActiveSnapshot>>>,
     published: tokio::sync::watch::Receiver<u64>,
+    incarnations: tokio::sync::watch::Receiver<Arc<InstallationIncarnations>>,
 }
 
 impl SnapshotWatch {
@@ -220,6 +227,22 @@ impl SnapshotWatch {
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.published.clone()
     }
+
+    /// The incarnation of `extension_id`'s installation record, `None` when
+    /// no record exists. Unlike the snapshot it is unaffected by activation
+    /// state: a deactivated installation keeps its incarnation, and removing
+    /// then re-installing yields a larger one.
+    pub fn installation_incarnation(&self, extension_id: &str) -> Option<u64> {
+        self.incarnations.borrow().get(extension_id)
+    }
+
+    /// Subscribe to installation record creation and deletion (values
+    /// coalesce; re-read [`Self::installation_incarnation`] after a wake).
+    pub fn subscribe_installations(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Arc<InstallationIncarnations>> {
+        self.incarnations.clone()
+    }
 }
 
 /// Typed lifecycle failures.
@@ -240,15 +263,18 @@ pub enum LifecycleError {
 impl ExtensionHost {
     pub async fn new(deps: ExtensionHostDeps) -> Self {
         let (snapshot_published, snapshot_published_rx) = tokio::sync::watch::channel(0);
+        let (incarnations, _) = tokio::sync::watch::channel(Arc::default());
         Self {
             deps,
             lifecycle_lock: Mutex::new(LifecycleState {
                 snapshot: ActiveSnapshot::empty(),
                 generation: 0,
+                next_incarnation: 0,
             }),
             snapshot_cell: Arc::new(RwLock::new(ActiveSnapshot::empty())),
             snapshot_published,
             snapshot_published_rx,
+            incarnations,
         }
     }
 
@@ -264,6 +290,7 @@ impl ExtensionHost {
         SnapshotWatch {
             cell: Arc::clone(&self.snapshot_cell),
             published: self.snapshot_published_rx.clone(),
+            incarnations: self.incarnations.subscribe(),
         }
     }
 
@@ -282,14 +309,25 @@ impl ExtensionHost {
     }
 
     /// Install a resolved extension in `Installed` state (idempotent upsert).
+    ///
+    /// The first install of an extension id mints its installation
+    /// incarnation; installing over an existing record keeps it.
     pub async fn install(&self, record: InstallationRecord) -> Result<(), LifecycleError> {
-        let _guard = self.lifecycle_lock.lock().await;
+        let mut guard = self.lifecycle_lock.lock().await;
+        let existing = self.deps.store.get(&record.extension_id).await?;
+        let extension_id = record.extension_id.clone();
         let record = InstallationRecord {
             state: InstallationState::Installed,
             last_error: None,
             ..record
         };
         self.deps.store.upsert(record).await?;
+        if existing.is_none() {
+            let state = &mut *guard;
+            self.incarnations.send_if_modified(|incarnations| {
+                Arc::make_mut(incarnations).ensure(&extension_id, &mut state.next_incarnation)
+            });
+        }
         Ok(())
     }
 
@@ -573,6 +611,10 @@ impl ExtensionHost {
     pub async fn remove_record(&self, extension_id: &str) -> Result<(), LifecycleError> {
         let _guard = self.lifecycle_lock.lock().await;
         self.deps.store.delete(extension_id).await?;
+        // Only after the delete took effect: a failed delete leaves the
+        // record, so its incarnation must stay too.
+        self.incarnations
+            .send_if_modified(|incarnations| Arc::make_mut(incarnations).clear(extension_id));
         Ok(())
     }
 

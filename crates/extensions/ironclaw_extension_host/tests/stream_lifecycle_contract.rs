@@ -198,6 +198,235 @@ async fn a_configuration_change_restarts_a_deployment_stream_that_needs_an_admin
     wait_until(|| harness.gateway.ack_count() == 1, "the ACK").await;
 }
 
+/// A deployment-bound stream follows the installation record: it does not
+/// dial at boot with nothing installed, a deactivation (which leaves the
+/// record) keeps it up, removing the record closes it, and a reinstall
+/// reconnects with no change signal.
+#[tokio::test]
+async fn a_deployment_stream_runs_only_while_an_installation_exists() {
+    let harness = Harness::start(HarnessOptions {
+        deployment: true,
+        ..HarnessOptions::default()
+    })
+    .await;
+    reconcile_fence(&harness, "acme-fence-one").await;
+    assert_eq!(
+        harness
+            .audit
+            .count_for(EXTENSION_ID, &StreamAuditKind::Connected),
+        0,
+        "no installation, no deployment connection"
+    );
+
+    harness.activate().await;
+    connected(&harness, 2).await;
+    let accepts = harness.gateway.accepts.load(Ordering::SeqCst);
+
+    harness
+        .host
+        .deactivate(EXTENSION_ID)
+        .await
+        .expect("deactivate");
+    reconcile_fence(&harness, "acme-fence-two").await;
+    assert_eq!(
+        harness
+            .audit
+            .count_for(EXTENSION_ID, &StreamAuditKind::Stopped),
+        0,
+        "a deactivated installation still exists, so its deployment stream stays up"
+    );
+
+    harness
+        .host
+        .remove_record(EXTENSION_ID)
+        .await
+        .expect("remove record");
+    wait_until(
+        || {
+            harness
+                .audit
+                .count_for(EXTENSION_ID, &StreamAuditKind::Stopped)
+                == 1
+        },
+        "the deployment connection to stop",
+    )
+    .await;
+    reconcile_fence(&harness, "acme-fence-three").await;
+    assert_eq!(
+        harness.gateway.accepts.load(Ordering::SeqCst),
+        accepts + 2,
+        "a removed installation's deployment stream is never redialed (only the two fences dialed)"
+    );
+
+    harness.activate().await;
+    wait_until(
+        || {
+            harness
+                .audit
+                .count_for(EXTENSION_ID, &StreamAuditKind::Connected)
+                == 2
+        },
+        "the reconnection without any change signal",
+    )
+    .await;
+}
+
+/// The administrator-save path (deactivate, upsert the record, activate, then
+/// the configuration signal) closes a connected deployment stream once and
+/// dials once.
+#[tokio::test]
+async fn an_administrator_save_restarts_a_connected_deployment_stream_exactly_once() {
+    use ironclaw_extension_host::channel_config::{
+        ChannelConfigReactivation, ChannelConfigReactivationError,
+    };
+    use ironclaw_extension_host::stream_supervisor::StreamRestartingReactivation;
+
+    struct HostReactivation {
+        host: std::sync::Arc<ironclaw_extension_host::lifecycle::ExtensionHost>,
+        record: ironclaw_extension_host::store::InstallationRecord,
+    }
+    #[async_trait::async_trait]
+    impl ChannelConfigReactivation for HostReactivation {
+        async fn reactivate_if_active(
+            &self,
+            extension_id: &ironclaw_host_api::ids::ExtensionId,
+        ) -> Result<(), ChannelConfigReactivationError> {
+            let fail = |error: ironclaw_extension_host::lifecycle::LifecycleError| {
+                ChannelConfigReactivationError::new(error.to_string())
+            };
+            self.host
+                .deactivate(extension_id.as_str())
+                .await
+                .map_err(fail)?;
+            // Hold the transient state long enough for the supervisor to
+            // reconcile against it; a gate on the activation snapshot would
+            // close the connection here.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            self.host.install(self.record.clone()).await.map_err(fail)?;
+            self.host
+                .activate(extension_id.as_str())
+                .await
+                .map_err(fail)?;
+            // The configuration signal arrives after the supervisor has
+            // already acted on the activation, as it does in production.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok(())
+        }
+    }
+
+    let harness = Harness::start(HarnessOptions {
+        deployment: true,
+        ..HarnessOptions::default()
+    })
+    .await;
+    harness.activate().await;
+    connected(&harness, 1).await;
+
+    let reactivation = StreamRestartingReactivation::new(
+        std::sync::Arc::new(HostReactivation {
+            host: std::sync::Arc::clone(&harness.host),
+            record: harness.installation_record(),
+        }),
+        std::sync::Arc::clone(&harness.changes),
+    );
+    reactivation
+        .reactivate_if_active(&ironclaw_host_api::ids::ExtensionId::new(EXTENSION_ID).expect("id"))
+        .await
+        .expect("reactivate");
+    reconcile_fence(&harness, "acme-fence-two").await;
+
+    assert_eq!(
+        harness
+            .audit
+            .count_for(EXTENSION_ID, &StreamAuditKind::Connected),
+        2,
+        "one initial connection and one restart"
+    );
+    assert_eq!(
+        harness
+            .audit
+            .count_for(EXTENSION_ID, &StreamAuditKind::Stopped),
+        1,
+        "the old connection closed once"
+    );
+    assert_eq!(harness.gateway.closed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        harness.egress.call_count(),
+        3,
+        "one grant, one restart, one fence"
+    );
+}
+
+/// Remove then reinstall while the supervisor is busy stopping something
+/// else: the publications coalesce, but the new installation is still a
+/// different one, so the old connection is replaced.
+#[tokio::test]
+async fn a_coalesced_remove_and_reinstall_replaces_a_deployment_stream() {
+    let harness = Harness::start(HarnessOptions {
+        deployment: true,
+        ..HarnessOptions::default()
+    })
+    .await;
+    harness
+        .sink
+        .script
+        .lock()
+        .expect("script")
+        .delay
+        .insert("Ev-1".to_string(), Duration::from_millis(1500));
+    harness.activate().await;
+    connected(&harness, 1).await;
+    // Park the supervisor inside a slow stop of an unrelated connection.
+    harness.activate_other("acme-two").await;
+    wait_until(
+        || {
+            harness
+                .audit
+                .count_for("acme-two", &StreamAuditKind::Connected)
+                == 1
+        },
+        "the other connection",
+    )
+    .await;
+    harness
+        .gateway
+        .send_to_latest(event_frame("F-1", "Ev-1", "C-1"));
+    wait_until(
+        || harness.sink.attempts.lock().expect("attempts").len() == 1,
+        "the frame to be in the pipeline",
+    )
+    .await;
+    let host = std::sync::Arc::clone(&harness.host);
+    let deactivation = tokio::spawn(async move { host.deactivate("acme-two").await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    harness
+        .host
+        .remove_record(EXTENSION_ID)
+        .await
+        .expect("remove record");
+    harness.activate().await;
+    deactivation.await.expect("join").expect("deactivate");
+
+    wait_until(
+        || {
+            harness
+                .audit
+                .count_for(EXTENSION_ID, &StreamAuditKind::Connected)
+                == 2
+        },
+        "the replacement connection",
+    )
+    .await;
+    assert_eq!(
+        harness
+            .audit
+            .count_for(EXTENSION_ID, &StreamAuditKind::Stopped),
+        1,
+        "the pre-removal connection was stopped exactly once"
+    );
+}
+
 /// Activates another stream extension and waits for its connection. The
 /// supervisor serializes reconcile passes, and the pass that dials the new
 /// extension checks every running connection against the current

@@ -1,11 +1,12 @@
 //! Configuration-change signal for stream connections.
 //!
-//! A deployment-bound stream channel keeps one source for the life of the
-//! process, so republishing the active snapshot never replaces its
-//! connection. When an administrator saves or changes the channel's
-//! configuration, the host bumps a per-extension generation here and the
-//! supervisor restarts that extension's deployment-sourced connection, which
-//! re-reads the stored values. Only extension ids and counters pass through
+//! A deployment-bound stream connection follows the installation record, so
+//! republishing the active snapshot (deactivate, re-activate) never replaces
+//! it. When an administrator saves or changes the channel's configuration, the
+//! host bumps a per-extension generation here and the supervisor restarts that
+//! extension's deployment-sourced connection, once, which re-reads the stored
+//! values. This signal is the only restart trigger for a deployment source
+//! besides removing and re-installing the installation. Only extension ids and counters pass through
 //! this type; it never sees a configuration value.
 
 use std::collections::HashMap;
@@ -55,10 +56,11 @@ impl StreamConfigurationChanges {
 
 /// Decorates the host's re-activation port: after the inner re-activation
 /// runs, the extension's configuration generation advances so a deployment
-/// stream connection restarts too. The notification is unconditional: the
-/// configuration is already persisted, and a connection stopped for missing
-/// credentials should retry with the new values even when re-activation
-/// reports an error or finds no active installation.
+/// stream connection restarts. The re-activation itself leaves a deployment
+/// connection alone, so this is its one restart. The notification is
+/// unconditional: the configuration is already persisted, and a connection
+/// stopped for missing credentials should retry with the new values even when
+/// re-activation reports an error.
 pub struct StreamRestartingReactivation {
     inner: Arc<dyn ChannelConfigReactivation>,
     changes: Arc<StreamConfigurationChanges>,
